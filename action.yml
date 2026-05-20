@@ -1,0 +1,25 @@
+name: 'PR State Bug Hunter'
+description: 'AI-powered static and dynamic analyzer to catch asynchronous race conditions, memory leaks, and React state bugs in pull requests.'
+author: 'Antigravity AI'
+inputs:
+  github-token:
+    description: 'The GITHUB_TOKEN or a custom GitHub Personal Access Token.'
+    required: true
+    default: '${{ github.token }}'
+  gemini-api-key:
+    description: 'API key for Gemini models to analyze detected async vulnerability spots.'
+    required: false
+  severity-threshold:
+    description: 'Minimum severity of bugs to report on the PR (LOW, MEDIUM, HIGH).'
+    required: false
+    default: 'LOW'
+  auto-comment:
+    description: 'Whether the action should post inline and overview review comments on the PR.'
+    required: false
+    default: 'true'
+runs:
+  using: 'node20'
+  main: 'src/index.js'
+branding:
+  icon: 'shield'
+  color: 'blue'
