@@ -1,5 +1,5 @@
 name: 'PR State Bug Hunter'
-description: 'AI-powered static and dynamic analyzer to catch asynchronous race conditions, memory leaks, and React state bugs in pull requests.'
+description: 'AI-powered analyzer to catch async race conditions, memory leaks, and React state bugs in PRs.'
 author: 'Antigravity AI'
 inputs:
   github-token:
