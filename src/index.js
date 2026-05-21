@@ -148,6 +148,8 @@ async function run() {
     const severityThreshold = core.getInput('severity-threshold') || process.env.SEVERITY_THRESHOLD || 'LOW';
     const autoComment = (core.getInput('auto-comment') || process.env.AUTO_COMMENT || 'true') === 'true';
     const geminiModel = core.getInput('gemini-model') || process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+    const localAiBaseUrl = core.getInput('local-ai-base-url') || process.env.LOCAL_AI_BASE_URL;
+    const localModelName = core.getInput('local-model-name') || process.env.LOCAL_MODEL_NAME;
 
     if (!githubToken) {
       core.setFailed("Missing GITHUB_TOKEN. Please set the token input or environment variable.");
@@ -211,7 +213,13 @@ async function run() {
           }
         }
 
-        const verifiedBugs = await huntStateBugsWithGemini(geminiApiKey, changes, astWarnings, geminiModel);
+        const verifiedBugs = await huntStateBugsWithGemini(
+          geminiApiKey, 
+          changes, 
+          astWarnings, 
+          geminiModel,
+          { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
+        );
 
         let fixesApplied = 0;
         for (const bug of verifiedBugs) {
@@ -308,11 +316,17 @@ async function run() {
     console.log(`AST sweep complete. Scanned ${filesScannedCount} files, encountered ${astWarnings.length} structurally weak points in updated lines.`);
 
     let verifiedBugs = [];
-    if (geminiApiKey) {
-      console.log(`Step 3: Initiating Gemini AI Agent (${geminiModel}) semantic auditing...`);
-      verifiedBugs = await huntStateBugsWithGemini(geminiApiKey, changes, astWarnings, geminiModel);
+    if (geminiApiKey || localAiBaseUrl) {
+      console.log(`Step 3: Initiating AI Agent semantic auditing...`);
+      verifiedBugs = await huntStateBugsWithGemini(
+        geminiApiKey, 
+        changes, 
+        astWarnings, 
+        geminiModel,
+        { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
+      );
     } else {
-      console.log("Step 3: No GEMINI_API_KEY provided. Defaulting to raw AST warning reports...");
+      console.log("Step 3: Neither GEMINI_API_KEY nor LOCAL_AI_BASE_URL provided. Defaulting to raw AST warning reports...");
       verifiedBugs = astWarnings.map(w => ({
         filePath: w.path,
         line: w.line,

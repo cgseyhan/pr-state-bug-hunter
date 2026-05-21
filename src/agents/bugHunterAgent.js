@@ -90,11 +90,12 @@ function extractIssuesArray(jsonResponse) {
 }
 
 /**
- * Call OpenAI API using native fetch (supported in Node 18+).
+ * Call OpenAI API or OpenAI-compatible Local AI API using native fetch.
  */
-async function callOpenAI(apiKey, prompt, modelName = 'gpt-4o-mini') {
+async function callOpenAI(apiKey, prompt, modelName = 'gpt-4o-mini', apiBaseUrl = 'https://api.openai.com/v1') {
   try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const base = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
+    const response = await fetch(`${base}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -119,13 +120,13 @@ async function callOpenAI(apiKey, prompt, modelName = 'gpt-4o-mini') {
 
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`OpenAI API returned status ${response.status}: ${errText}`);
+      throw new Error(`AI API returned status ${response.status}: ${errText}`);
     }
 
     const data = await response.json();
     return data.choices[0]?.message?.content || '[]';
   } catch (err) {
-    console.error(`OpenAI invocation failed: ${err.message}`);
+    console.error(`AI invocation failed: ${err.message}`);
     throw err;
   }
 }
@@ -138,23 +139,31 @@ async function callOpenAI(apiKey, prompt, modelName = 'gpt-4o-mini') {
  * @param {string} modelName - Model name to use (defaults to gemini-1.5-flash or gpt-4o-mini depending on key).
  * @returns {Promise<Array<{filePath: string, line: number, ruleId: string, isRealBug: boolean, severity: string, explanation: string, proposedFix: string}>>}
  */
-export async function huntStateBugsWithGemini(apiKey, changes, astWarnings, modelName = 'gemini-1.5-flash') {
-  if (!apiKey) {
-    console.log("No API Key provided. Skipping AI analysis step.");
+export async function huntStateBugsWithGemini(apiKey, changes, astWarnings, modelName = 'gemini-1.5-flash', localOptions = {}) {
+  const localBaseUrl = localOptions.apiBaseUrl || process.env.LOCAL_AI_BASE_URL;
+  const localModel = localOptions.modelName || process.env.LOCAL_MODEL_NAME;
+  const isLocalAI = !!localBaseUrl;
+
+  if (!apiKey && !isLocalAI) {
+    console.log("No API Key or Local AI Base URL provided. Skipping AI analysis step.");
     return [];
   }
 
-  const isOpenAI = apiKey.startsWith('sk-');
-  const actualModel = isOpenAI 
-    ? (modelName === 'gemini-1.5-flash' ? 'gpt-4o-mini' : modelName)
-    : modelName;
+  const isOpenAI = apiKey ? apiKey.startsWith('sk-') : false;
+  
+  let actualModel = modelName;
+  if (isLocalAI) {
+    actualModel = localModel || modelName || 'llama3';
+  } else if (isOpenAI) {
+    actualModel = modelName === 'gemini-1.5-flash' ? 'gpt-4o-mini' : modelName;
+  }
 
-  console.log(`AI Agent utilizing provider: ${isOpenAI ? 'OpenAI' : 'Google Gemini'} (${actualModel})`);
+  console.log(`AI Agent utilizing provider: ${isLocalAI ? 'Local AI' : (isOpenAI ? 'OpenAI' : 'Google Gemini')} (${actualModel})`);
 
   let genAI = null;
   let geminiModel = null;
 
-  if (!isOpenAI) {
+  if (!isLocalAI && !isOpenAI) {
     genAI = new GoogleGenerativeAI(apiKey);
     geminiModel = genAI.getGenerativeModel({
       model: actualModel,
@@ -262,8 +271,10 @@ Return your response strictly as a JSON array of objects with this structure (no
 
       try {
         let text = '';
-        if (isOpenAI) {
-          text = await callOpenAI(apiKey, prompt, actualModel);
+        if (isLocalAI || isOpenAI) {
+          const apiBase = localBaseUrl || 'https://api.openai.com/v1';
+          const key = apiKey || 'local-key';
+          text = await callOpenAI(key, prompt, actualModel, apiBase);
         } else {
           const response = await geminiModel.generateContent(prompt);
           text = response.response.text();
@@ -358,8 +369,10 @@ Return your response strictly as a JSON array of objects with this structure (no
 
       try {
         let text = '';
-        if (isOpenAI) {
-          text = await callOpenAI(apiKey, prompt, actualModel);
+        if (isLocalAI || isOpenAI) {
+          const apiBase = localBaseUrl || 'https://api.openai.com/v1';
+          const key = apiKey || 'local-key';
+          text = await callOpenAI(key, prompt, actualModel, apiBase);
         } else {
           const response = await geminiModel.generateContent(prompt);
           text = response.response.text();

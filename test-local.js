@@ -46,6 +46,9 @@ async function runLocalSuite() {
   const vuePath = 'src/test-cases/buggyVue.vue';
 
   const apiKey = process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY;
+  const localAiBaseUrl = process.env.LOCAL_AI_BASE_URL;
+  const localModelName = process.env.LOCAL_MODEL_NAME;
+  const hasAi = !!(apiKey || localAiBaseUrl);
 
   if (fixLine) {
     console.log(`\n🛠️  Executing Simulated Auto-Fix for line ${fixLine} in ${reactPath}...`);
@@ -54,8 +57,8 @@ async function runLocalSuite() {
       return;
     }
 
-    if (!apiKey) {
-      console.error("❌ Error: GEMINI_API_KEY or OPENAI_API_KEY is required to generate AI fixes.");
+    if (!hasAi) {
+      console.error("❌ Error: GEMINI_API_KEY, OPENAI_API_KEY, or LOCAL_AI_BASE_URL is required to generate AI fixes.");
       return;
     }
 
@@ -72,7 +75,13 @@ async function runLocalSuite() {
     }];
 
     console.log("Contacting AI Agent to retrieve drop-in proposed fixes...");
-    const verifiedBugs = await huntStateBugsWithGemini(apiKey, mockChanges, mappedWarnings, 'gemini-1.5-flash');
+    const verifiedBugs = await huntStateBugsWithGemini(
+      apiKey, 
+      mockChanges, 
+      mappedWarnings, 
+      'gemini-1.5-flash',
+      { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
+    );
 
     const targetBug = verifiedBugs.find(b => String(b.line) === String(fixLine));
     if (!targetBug) {
@@ -159,7 +168,7 @@ async function runLocalSuite() {
   // TEST 3: Semantic AI Auditing & Granular Hashing Cache Hits
   // ----------------------------------------------------
   let cachePassed = true;
-  if (apiKey) {
+  if (hasAi) {
     console.log("\n[TEST 3] Running Semantic AI Review & Incremental Cache verification...");
 
     const mappedReactWarnings = reactWarnings.map(w => ({ ...w, path: reactPath }));
@@ -174,7 +183,13 @@ async function runLocalSuite() {
     // --- RUN 1: Fetching (Cache Miss or Initial Load) ---
     console.log("  🏎️  Executing Run 1 (Cache Miss or Initial Load)...");
     const t0 = Date.now();
-    const run1Bugs = await huntStateBugsWithGemini(apiKey, mockChanges, mappedReactWarnings, 'gemini-1.5-flash');
+    const run1Bugs = await huntStateBugsWithGemini(
+      apiKey, 
+      mockChanges, 
+      mappedReactWarnings, 
+      'gemini-1.5-flash',
+      { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
+    );
     const t1 = Date.now();
     const run1Duration = t1 - t0;
     console.log(`  📊 Run 1 completed in ${run1Duration}ms. Found ${run1Bugs.length} verified bugs.`);
@@ -182,7 +197,13 @@ async function runLocalSuite() {
     // --- RUN 2: Executing from Cache (Cache Hit) ---
     console.log("\n  ⚡ Executing Run 2 immediately (Incremental Cache Hit test)...");
     const t2 = Date.now();
-    const run2Bugs = await huntStateBugsWithGemini(apiKey, mockChanges, mappedReactWarnings, 'gemini-1.5-flash');
+    const run2Bugs = await huntStateBugsWithGemini(
+      apiKey, 
+      mockChanges, 
+      mappedReactWarnings, 
+      'gemini-1.5-flash',
+      { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
+    );
     const t3 = Date.now();
     const run2Duration = t3 - t2;
     console.log(`  📊 Run 2 completed in ${run2Duration}ms. Found ${run2Bugs.length} verified bugs.`);
@@ -194,7 +215,7 @@ async function runLocalSuite() {
       cachePassed = false;
     }
   } else {
-    console.log("\n[TEST 3] Skipping AI review & Caching tests (Define GEMINI_API_KEY/OPENAI_API_KEY inside .env to test).");
+    console.log("\n[TEST 3] Skipping AI review & Caching tests (Define GEMINI_API_KEY, OPENAI_API_KEY, or LOCAL_AI_BASE_URL inside .env to test).");
   }
 
   console.log("\n==================================================");
@@ -203,7 +224,7 @@ async function runLocalSuite() {
   console.log(`React/Taint Sweeps:  ${reactPassed ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`Svelte store Sweeps: ${sveltePassed ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`Vue listener Sweeps: ${vuePassed ? '✅ PASS' : '❌ FAIL'}`);
-  if (apiKey) {
+  if (hasAi) {
     console.log(`AI Semantic Cache:  ${cachePassed ? '✅ PASS' : '❌ FAIL'}`);
   }
   console.log("==================================================");

@@ -17,6 +17,12 @@ inputs:
     description: 'Whether the action should post inline and overview review comments on the PR.'
     required: false
     default: 'true'
+  local-ai-base-url:
+    description: 'Optional API base URL for Local AI (e.g. Ollama http://localhost:11434/v1 or LM Studio).'
+    required: false
+  local-model-name:
+    description: 'Optional model name for Local AI (e.g. deepseek-coder, qwen2.5-coder).'
+    required: false
 runs:
   using: 'node20'
   main: 'dist/index.js'

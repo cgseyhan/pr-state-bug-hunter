@@ -119,6 +119,8 @@ jobs:
 *   `severity-threshold` (Default: `LOW`): The filtering threshold for reporting vulnerabilities (`LOW`, `MEDIUM`, `HIGH`).
 *   `auto-comment` (Default: `true`): Dictates whether the engine automatically submits inline review comments and summary panels.
 *   `gemini-model` (Default: `gemini-1.5-flash`): The target model name used for semantic evaluation.
+*   `local-ai-base-url` (Optional): Custom API base URL for Local AI models (e.g., Ollama `http://localhost:11434/v1`, LM Studio `http://localhost:1234/v1`). If set, all semantic validation calls are routed to this local endpoint.
+*   `local-model-name` (Optional, Default: `llama3`): Custom model name to use when routing requests to a Local AI endpoint (e.g., `deepseek-coder`, `qwen2.5-coder`, `llama3`).
 
 ---
 
@@ -133,12 +135,19 @@ npm install
 ```
 
 ### 2. Configure Local Environment Variables
-Create a `.env` file at the root of the workspace directory and specify your API credentials:
+Create a `.env` file at the root of the workspace directory and specify your API credentials, or point to your Local AI setup:
 ```env
-GEMINI_API_KEY=sk-proj-YOUR_API_KEY_HERE
+# For Cloud AI (Gemini or OpenAI)
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+# OR: OPENAI_API_KEY=YOUR_OPENAI_API_KEY
+
+# Alternatively, for Local AI (Ollama / LM Studio / Llama.cpp)
+LOCAL_AI_BASE_URL=http://localhost:11434/v1
+LOCAL_MODEL_NAME=qwen2.5-coder
 ```
 > [!NOTE]  
-> The internal multi-provider client automatically detects the `'sk-'` prefix, seamlessly routing requests to OpenAI's REST endpoints instead of Google Gemini.
+> * The internal multi-provider client automatically detects the `'sk-'` prefix in `GEMINI_API_KEY` (or if you use `OPENAI_API_KEY`), seamlessly routing requests to OpenAI's REST endpoints instead of Google Gemini.
+> * If `LOCAL_AI_BASE_URL` is defined, the tool operates entirely locally without sending any data to cloud services. Highly recommended for offline development or proprietary code privacy.
 
 ### 3. Run the Verification Suite
 Execute the local test runner to run React, Svelte, Vue AST scans, taint tracking checks, and AI semantic cache hits:
