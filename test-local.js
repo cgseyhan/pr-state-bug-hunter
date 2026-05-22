@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 import { execSync } from 'child_process';
-import { analyzeCodeAST } from './src/analyzer/astParser.js';
+import { analyzeCodeAST, escalateWarnings } from './src/analyzer/astParser.js';
 import { huntStateBugsWithGemini } from './src/agents/bugHunterAgent.js';
 import { applyFixToText, logTelemetry } from './src/index.js';
 
@@ -111,8 +111,12 @@ async function runLocalSuite() {
       const fileContent = fs.readFileSync(filePath, 'utf8');
       const fileWarnings = analyzeCodeAST(fileContent, filePath);
 
+      // Add path for escalation checking
+      const warningsWithPath = fileWarnings.map(w => ({ ...w, path: filePath }));
+      const escalatedFileWarnings = escalateWarnings(warningsWithPath, '.');
+
       // Filter warnings matching changed lines
-      const relevantWarnings = fileWarnings.filter(w => changedLines.includes(w.line));
+      const relevantWarnings = escalatedFileWarnings.filter(w => changedLines.includes(w.line));
 
       if (relevantWarnings.length === 0) {
         console.log("   ✅ No state/async bugs found in staged changes!");
@@ -172,7 +176,7 @@ async function runLocalSuite() {
 
     const code = fs.readFileSync(reactPath, 'utf8');
     const warnings = analyzeCodeAST(code, reactPath);
-    const mappedWarnings = warnings.map(w => ({ ...w, path: reactPath }));
+    const mappedWarnings = escalateWarnings(warnings.map(w => ({ ...w, path: reactPath })), '.');
 
     const fileLinesCount = code.split('\n').length;
     const changedLines = Array.from({ length: fileLinesCount }, (_, i) => i + 1);
@@ -220,7 +224,8 @@ async function runLocalSuite() {
   // ----------------------------------------------------
   console.log("\n[TEST 1] Running Static AST React Sweeps & Taint Tracking...");
   const reactCode = fs.readFileSync(reactPath, 'utf8');
-  const reactWarnings = analyzeCodeAST(reactCode, reactPath);
+  const reactWarningsRaw = analyzeCodeAST(reactCode, reactPath);
+  const reactWarnings = escalateWarnings(reactWarningsRaw.map(w => ({ ...w, path: reactPath })), '.');
 
   const reactTriggered = reactWarnings.map(w => w.ruleId);
   const reactExpected = [
@@ -326,12 +331,36 @@ async function runLocalSuite() {
     console.log("\n[TEST 3] Skipping AI review & Caching tests (Define GEMINI_API_KEY, OPENAI_API_KEY, or LOCAL_AI_BASE_URL inside .env to test).");
   }
 
+  // ----------------------------------------------------
+  // TEST 4: Taint-Based Severity Escalation
+  // ----------------------------------------------------
+  console.log("\n[TEST 4] Running Taint-Based Severity Escalation Checks...");
+  const sharedPath = 'src/test-cases/buggySharedComponent.jsx';
+  const sharedCode = fs.readFileSync(sharedPath, 'utf8');
+  const sharedWarningsRaw = analyzeCodeAST(sharedCode, sharedPath);
+  const sharedWarnings = escalateWarnings(sharedWarningsRaw.map(w => ({ ...w, path: sharedPath })), '.');
+
+  let escalationPassed = false;
+  const asyncWarning = sharedWarnings.find(w => w.ruleId === 'EFFECT_UNGUARDED_ASYNC');
+  if (asyncWarning) {
+    if (asyncWarning.severity === 'HIGH' && asyncWarning.message.includes('Escalated: Imported by high-risk component <paymentCheckoutPortal.jsx>')) {
+      console.log("  ✅ Escalation Pass: BuggySharedComponent's async warning escalated successfully to HIGH!");
+      console.log(`     Message: ${asyncWarning.message}`);
+      escalationPassed = true;
+    } else {
+      console.error(`  ❌ Escalation Fail: Severity is ${asyncWarning.severity} (expected HIGH), message: "${asyncWarning.message}"`);
+    }
+  } else {
+    console.error("  ❌ Escalation Fail: No EFFECT_UNGUARDED_ASYNC warning found in buggySharedComponent.jsx!");
+  }
+
   console.log("\n==================================================");
   console.log("📊 FINAL VERIFICATION REPORT");
   console.log("==================================================");
   console.log(`React/Taint Sweeps:  ${reactPassed ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`Svelte store Sweeps: ${sveltePassed ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`Vue listener Sweeps: ${vuePassed ? '✅ PASS' : '❌ FAIL'}`);
+  console.log(`Taint Escalation:    ${escalationPassed ? '✅ PASS' : '❌ FAIL'}`);
   if (hasAi) {
     console.log(`AI Semantic Cache:  ${cachePassed ? '✅ PASS' : '❌ FAIL'}`);
   }

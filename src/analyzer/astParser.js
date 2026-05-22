@@ -1,5 +1,7 @@
 import * as parser from '@babel/parser';
 import _traverse from '@babel/traverse';
+import path from 'path';
+import { buildDependencyGraph, findPathToHighRisk } from './dependencyGraph.js';
 const traverse = _traverse.default || _traverse;
 
 /**
@@ -695,6 +697,42 @@ export function verifySyntax(code, filePath) {
     return { valid: true };
   } catch (err) {
     return { valid: false, error: err.message };
+  }
+}
+
+/**
+ * Escalates severity of warnings if the buggy component is imported by a high-risk component.
+ * @param {Array} warnings - Array of AST warnings.
+ * @param {string} workspaceDir - Path to workspace root directory.
+ * @returns {Array} Updated warnings with potential escalations.
+ */
+export function escalateWarnings(warnings, workspaceDir = '.') {
+  if (!workspaceDir) return warnings;
+  try {
+    const { graph, highRiskFiles } = buildDependencyGraph(workspaceDir);
+    if (highRiskFiles.size === 0) return warnings;
+
+    return warnings.map(w => {
+      const filePath = w.path || w.filePath;
+      if (!filePath) return w;
+
+      const route = findPathToHighRisk(filePath, graph, highRiskFiles);
+      if (route && route.length > 1) {
+        const highRiskFile = route[route.length - 1];
+        const importerFile = path.basename(highRiskFile);
+        
+        // Return escalated warning
+        return {
+          ...w,
+          severity: 'HIGH',
+          message: `${w.message} [Escalated: Imported by high-risk component <${importerFile}>]`
+        };
+      }
+      return w;
+    });
+  } catch (err) {
+    console.warn(`[Escalation Warning]: Could not process taint-based severity escalation: ${err.message}`);
+    return warnings;
   }
 }
 

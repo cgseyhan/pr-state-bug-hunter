@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { getPrChanges } from './analyzer/diffParser.js';
-import { analyzeCodeAST, verifySyntax } from './analyzer/astParser.js';
+import { analyzeCodeAST, verifySyntax, escalateWarnings } from './analyzer/astParser.js';
 import { huntStateBugsWithGemini } from './agents/bugHunterAgent.js';
 import { 
   postInlineReviewComments, 
@@ -328,19 +328,22 @@ async function run() {
 
     console.log(`AST sweep complete. Scanned ${filesScannedCount} files, encountered ${astWarnings.length} structurally weak points in updated lines.`);
 
+    // Perform Taint-Based Severity Escalation
+    const escalatedWarnings = escalateWarnings(astWarnings, '.');
+
     let verifiedBugs = [];
     if (geminiApiKey || localAiBaseUrl) {
       console.log(`Step 3: Initiating AI Agent semantic auditing...`);
       verifiedBugs = await huntStateBugsWithGemini(
         geminiApiKey, 
         changes, 
-        astWarnings, 
+        escalatedWarnings, 
         geminiModel,
         { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
       );
     } else {
       console.log("Step 3: Neither GEMINI_API_KEY nor LOCAL_AI_BASE_URL provided. Defaulting to raw AST warning reports...");
-      verifiedBugs = astWarnings.map(w => ({
+      verifiedBugs = escalatedWarnings.map(w => ({
         filePath: w.path,
         line: w.line,
         ruleId: w.ruleId,
