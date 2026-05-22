@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
+import { execSync } from 'child_process';
 import { analyzeCodeAST } from './src/analyzer/astParser.js';
 import { huntStateBugsWithGemini } from './src/agents/bugHunterAgent.js';
 import { applyFixToText, logTelemetry } from './src/index.js';
@@ -40,6 +41,113 @@ async function runLocalSuite() {
   const args = process.argv.slice(2);
   const fixIndex = args.indexOf('--fix');
   const fixLine = fixIndex !== -1 ? parseInt(args[fixIndex + 1], 10) : null;
+
+  const preCommitIndex = args.indexOf('--pre-commit');
+  const isPreCommit = preCommitIndex !== -1;
+
+  if (isPreCommit) {
+    console.log("\n🏎️  PR State Bug Hunter - Executing Git Pre-Commit Hook Analyzer...");
+
+    let stagedFilesRaw = '';
+    try {
+      stagedFilesRaw = execSync('git diff --cached --name-only', { encoding: 'utf8' }).trim();
+    } catch (err) {
+      console.error(`❌ Error running git command: ${err.message}`);
+      process.exit(1);
+    }
+
+    if (!stagedFilesRaw) {
+      console.log("✅ No staged changes found in git repository. Hook skipped.");
+      process.exit(0);
+    }
+
+    const eligibleExtensions = ['.js', '.jsx', '.ts', '.tsx', '.svelte', '.vue'];
+    const stagedFiles = stagedFilesRaw.split('\n')
+      .map(f => f.trim())
+      .filter(f => f && eligibleExtensions.includes(path.extname(f).toLowerCase()))
+      .filter(f => fs.existsSync(f));
+
+    if (stagedFiles.length === 0) {
+      console.log("✅ No analyzable staged code files found (JS, TS, Svelte, Vue). Hook skipped.");
+      process.exit(0);
+    }
+
+    console.log(`Analyzing ${stagedFiles.length} staged file(s)...`);
+    let totalWarningsCount = 0;
+    let highSeverityWarningsCount = 0;
+
+    for (const filePath of stagedFiles) {
+      console.log(`\n🔍 Scanning file: ${filePath}`);
+      
+      // Get changed lines using git diff -U0
+      let diffOutput = '';
+      try {
+        diffOutput = execSync(`git diff --cached -U0 "${filePath}"`, { encoding: 'utf8' });
+      } catch (err) {
+        console.warn(`[Git Diff Warning]: Could not get diff for ${filePath}: ${err.message}`);
+        continue;
+      }
+
+      // Parse diff output to identify added/modified lines in the new version
+      const changedLines = [];
+      const lines = diffOutput.split('\n');
+      for (const line of lines) {
+        // e.g. @@ -80,2 +81,2 @@ or @@ -42 +42,2 @@ or @@ -12 +12 @@
+        const match = line.match(/^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,(\d+))?\s+@@/);
+        if (match) {
+          const startLine = parseInt(match[1], 10);
+          const count = match[2] ? parseInt(match[2], 10) : 1;
+          for (let i = 0; i < count; i++) {
+            changedLines.push(startLine + i);
+          }
+        }
+      }
+
+      if (changedLines.length === 0) {
+        console.log("   No added/modified lines in this file (e.g. only deletion). Skipping AST analysis.");
+        continue;
+      }
+
+      const fileContent = fs.readFileSync(filePath, 'utf8');
+      const fileWarnings = analyzeCodeAST(fileContent, filePath);
+
+      // Filter warnings matching changed lines
+      const relevantWarnings = fileWarnings.filter(w => changedLines.includes(w.line));
+
+      if (relevantWarnings.length === 0) {
+        console.log("   ✅ No state/async bugs found in staged changes!");
+      } else {
+        console.warn(`   ⚠️  Found ${relevantWarnings.length} AST warning(s) in staged changes:`);
+        for (const w of relevantWarnings) {
+          const sevPrefix = w.severity === 'HIGH' ? '🔴 HIGH' : w.severity === 'MEDIUM' ? '🟡 MEDIUM' : '🟢 LOW';
+          console.warn(`      [Line ${w.line}] [${sevPrefix}] [${w.ruleId}]: ${w.message}`);
+          totalWarningsCount++;
+          if (w.severity === 'HIGH') {
+            highSeverityWarningsCount++;
+          }
+        }
+      }
+    }
+
+    console.log("\n==================================================");
+    console.log("📊 PRE-COMMIT ANALYSIS REPORT SUMMARY");
+    console.log("==================================================");
+    console.log(`Total Staged Files Scanned: ${stagedFiles.length}`);
+    console.log(`Total State Warnings Found: ${totalWarningsCount}`);
+    console.log(`High Severity Warnings:     ${highSeverityWarningsCount}`);
+    
+    if (highSeverityWarningsCount > 0) {
+      console.error("\n❌ Commit Rejected! Critical state vulnerabilities or memory leaks detected in your staged changes.");
+      console.error("Please address the rule violations highlighted above before committing. 🛡️\n");
+      process.exit(1);
+    } else if (totalWarningsCount > 0) {
+      console.log("\n⚠️ Commit Accepted, but with warnings. Please review the moderate/low issues before pushing. 🛡️\n");
+      process.exit(0);
+    } else {
+      console.log("\n✅ Commit Accepted! Code is clean and structurally safe. Excellent work! 🚀\n");
+      process.exit(0);
+    }
+  }
 
   const reactPath = 'src/test-cases/buggyComponent.jsx';
   const sveltePath = 'src/test-cases/buggySvelte.svelte';

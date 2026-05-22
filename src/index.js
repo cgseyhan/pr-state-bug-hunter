@@ -4,12 +4,13 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { getPrChanges } from './analyzer/diffParser.js';
-import { analyzeCodeAST } from './analyzer/astParser.js';
+import { analyzeCodeAST, verifySyntax } from './analyzer/astParser.js';
 import { huntStateBugsWithGemini } from './agents/bugHunterAgent.js';
 import { 
   postInlineReviewComments, 
   postPrSummaryComment, 
-  commitFixToPrBranch 
+  commitFixToPrBranch,
+  postJobSummary
 } from './github/octokitClient.js';
 
 // Load local .env files if present (highly convenient for local tests/development)
@@ -237,6 +238,18 @@ async function run() {
 
             const updatedContent = applyFixToText(currentContent, bug.line, bug.proposedFix);
             if (updatedContent) {
+              const syntaxCheck = verifySyntax(updatedContent, bug.filePath);
+              if (!syntaxCheck.valid) {
+                console.warn(`[Syntax Validation Failed] Auto-fix at ${bug.filePath}:${bug.line} caused a syntax error: ${syntaxCheck.error}`);
+                await octokit.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: pullNumber,
+                  body: `🤖 **PR State Bug Hunter Auto-Fix Blocked!** ❌\n\nThe proposed fix for the bug on **line ${bug.line}** in \`${bug.filePath}\` was blocked because it introduces a syntax error:\n\n\`\`\`\n${syntaxCheck.error}\n\`\`\`\n\nPlease check the proposed fix and apply it manually. 🛡️`
+                });
+                continue;
+              }
+
               await commitFixToPrBranch(octokit, github.context, branchName, bug.filePath, updatedContent, bug.line);
               fixesApplied++;
 
@@ -358,6 +371,9 @@ async function run() {
       console.log("Step 5: Auto-comment is disabled. Printing findings summary to action log:");
       console.log(JSON.stringify(filteredBugs, null, 2));
     }
+
+    // Always publish job step summary report in GitHub runner UI
+    await postJobSummary(filesScannedCount, astWarnings.length, filteredBugs);
 
     console.log("==========================================");
     console.log("🎉 PR State Bug Hunter completed successfully!");

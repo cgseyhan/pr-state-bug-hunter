@@ -186,3 +186,82 @@ export async function commitFixToPrBranch(octokit, context, branchName, filePath
   }
 }
 
+/**
+ * Generates and posts a gorgeous markdown summary panel to the GitHub Action Run Step Summary.
+ * @param {number} filesScannedCount - Number of files scanned.
+ * @param {number} astWarningsCount - Number of AST warnings found.
+ * @param {Array} verifiedIssues - Array of AI-verified issues.
+ */
+export async function postJobSummary(filesScannedCount, astWarningsCount, verifiedIssues) {
+  console.log("Generating GitHub Step Summary Dashboard...");
+
+  const bugSeverityHigh = verifiedIssues.filter(i => i.severity?.toUpperCase() === 'HIGH').length;
+  const bugSeverityMed = verifiedIssues.filter(i => i.severity?.toUpperCase() === 'MEDIUM').length;
+  const bugSeverityLow = verifiedIssues.filter(i => i.severity?.toUpperCase() === 'LOW').length;
+
+  const totalBugs = verifiedIssues.length;
+  const isHealthy = totalBugs === 0;
+
+  let summaryHtml = `## 🛡️ PR State Bug Hunter - Executive Summary 🚀
+
+A hybrid static AST & semantic AI code audit has been completed successfully!
+
+### 📊 Scan Performance & Security Metrics
+| Metric | Value | Status |
+| :--- | :--- | :--- |
+| 📂 **Files Scanned** | \`${filesScannedCount}\` | Scan Completed |
+| 🔍 **AST Vulnerabilities** | \`${astWarningsCount}\` | Evaluated |
+| 🤖 **AI-Verified Bugs** | \`${totalBugs}\` | ${isHealthy ? '✅ Safe' : '❌ Review Required'} |
+| 🔴 **High Severity** | \`${bugSeverityHigh}\` | ${bugSeverityHigh > 0 ? '⚠️ Critical' : '✅ Clear'} |
+| 🟡 **Medium Severity** | \`${bugSeverityMed}\` | ${bugSeverityMed > 0 ? '⚠️ Moderate' : '✅ Clear'} |
+| 🟢 **Low Severity** | \`${bugSeverityLow}\` | ${bugSeverityLow > 0 ? 'ℹ️ Minor' : '✅ Clear'} |
+
+---
+
+### 📈 Concurrency Security Flow Analysis
+
+\`\`\`mermaid
+graph TD
+    A[PR Code Changes] -->|Babel AST Scanner| B("Detected structurally weak spots: ${astWarningsCount}")
+    B -->|Incremental Cryptographic Cache| C{Cache Hit?}
+    C -->|Yes: <5ms| D[Instant Resolution]
+    C -->|No: API Query| E[Gemini / OpenAI Agent Audit]
+    E -->|Semantic Analysis| F("Verified Bugs: ${totalBugs}")
+    D --> F
+    F -->|PR Dashboard / inline comments| G[Action Output Finished]
+\`\`\`
+
+---
+
+### 📁 Breakdown by Vulnerability Rule ID
+`;
+
+  if (totalBugs === 0) {
+    summaryHtml += `\n### ✅ Clean Bill of Health!
+No asynchronous state leaks, stale React closures, uncleaned timers/event listeners, or stream transport hazards were found. Your codebase is safe! 🌟\n`;
+  } else {
+    summaryHtml += `\n| Rule ID | File | Line | Severity |
+| :--- | :--- | :--- | :--- |
+`;
+    for (const bug of verifiedBugs) {
+      const sevEmoji = bug.severity?.toUpperCase() === 'HIGH' ? '🔴 HIGH' : bug.severity?.toUpperCase() === 'MEDIUM' ? '🟡 MEDIUM' : '🟢 LOW';
+      summaryHtml += `| \`${bug.ruleId}\` | \`${bug.filePath}\` | \`${bug.line}\` | ${sevEmoji} |\n`;
+    }
+  }
+
+  summaryHtml += `
+---
+_For automated repairs, comment \`/fix\` or \`/fix <line>\` directly on the pull request review thread. 🛠️_
+`;
+
+  try {
+    await core.summary
+      .addRaw(summaryHtml)
+      .write();
+    console.log("Successfully published the Step Summary Dashboard!");
+  } catch (err) {
+    console.warn(`[Summary Warning] Could not write step summary: ${err.message}`);
+  }
+}
+
+

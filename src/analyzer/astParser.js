@@ -663,3 +663,38 @@ function analyzeEffectCallbackBody(callbackNode, effectNode, warnings) {
     }
   }
 }
+
+/**
+ * Verifies if the JS/TS/JSX/TSX (or Svelte/Vue script) contains valid syntax.
+ * @param {string} code - The source code to verify.
+ * @param {string} filePath - The file path.
+ * @returns {{valid: boolean, error?: string}} Analysis result.
+ */
+export function verifySyntax(code, filePath) {
+  const plugins = ['jsx'];
+  if (/\.tsx?$/i.test(filePath)) {
+    plugins.push('typescript');
+  } else {
+    plugins.push('flow');
+  }
+
+  let codeToParse = code;
+  const isSvelte = /\.svelte$/i.test(filePath);
+  const isVue = /\.vue$/i.test(filePath);
+  if (isSvelte || isVue) {
+    codeToParse = preprocessVueSvelte(code);
+  }
+
+  try {
+    parser.parse(codeToParse, {
+      sourceType: 'module',
+      plugins,
+      allowImportExportEverywhere: true,
+      allowReturnOutsideFunction: true
+    });
+    return { valid: true };
+  } catch (err) {
+    return { valid: false, error: err.message };
+  }
+}
+
