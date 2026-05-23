@@ -39,8 +39,11 @@ export function isHighRiskFile(filePath, code = '') {
   if (highRiskRegex.test(path.basename(filePath))) {
     return true;
   }
-  if (code && highRiskRegex.test(code)) {
-    return true;
+  if (code) {
+    const sensitiveKeywords = /creditCard|cvv|password|jwt|api_key|billing|balance|checkout|payment|wallet/i;
+    if (sensitiveKeywords.test(code)) {
+      return true;
+    }
   }
   return false;
 }
@@ -98,15 +101,41 @@ export function extractImports(code, filePath) {
 /**
  * Recursively scans a directory for analyzable files.
  */
-export function scanDirectory(dir, fileList = []) {
+export function scanDirectory(dir, fileList = [], config = null) {
+  if (!config) {
+    try {
+      if (fs.existsSync('bug-hunter.config.json')) {
+        config = JSON.parse(fs.readFileSync('bug-hunter.config.json', 'utf8'));
+      }
+    } catch (e) {}
+  }
+  if (!config) config = {};
+
   if (!fs.existsSync(dir)) return fileList;
+
+  const isExcluded = (p) => {
+    if (config.exclude && Array.isArray(config.exclude)) {
+      return config.exclude.some(pattern => {
+        const escaped = pattern
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*\*/g, '.*')
+          .replace(/\*/g, '[^/]*');
+        const regex = new RegExp(`^${escaped}$` + '|' + escaped);
+        return regex.test(p) || regex.test(p.replace(/\\/g, '/'));
+      });
+    }
+    return false;
+  };
+
   const files = fs.readdirSync(dir);
   for (const file of files) {
     const filePath = path.join(dir, file);
+    if (isExcluded(filePath)) continue;
+
     const stat = fs.statSync(filePath);
     if (stat.isDirectory()) {
       if (file !== 'node_modules' && file !== '.git' && file !== 'dist') {
-        scanDirectory(filePath, fileList);
+        scanDirectory(filePath, fileList, config);
       }
     } else {
       const ext = path.extname(file).toLowerCase();

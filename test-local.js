@@ -233,7 +233,9 @@ async function runLocalSuite() {
     'EFFECT_UNCLEANED_SUBSCRIPTION',
     'EFFECT_UNGUARDED_ASYNC',
     'STALE_ASYNC_STATE_UPDATE',
-    'UNFRAMED_STREAM_DATA'
+    'UNFRAMED_STREAM_DATA',
+    'REACT_DIRECT_STATE_MUTATION',
+    'UNBOUNDED_LOOP_ASYNCHRONY'
   ];
 
   let reactPassed = true;
@@ -246,8 +248,8 @@ async function runLocalSuite() {
     }
   });
 
-  // Verify taint tracking (TransitiveCleanComponent and CleanComponent at line 80+ should have 0 false positives)
-  const falsePositives = reactWarnings.filter(w => w.line >= 80);
+  // Verify taint tracking (TransitiveCleanComponent and CleanComponent at line 80-142 should have 0 false positives)
+  const falsePositives = reactWarnings.filter(w => w.line >= 80 && w.line < 143);
   if (falsePositives.length === 0) {
     console.log("  ✅ Taint Analysis Pass: 0 false-positives raised in Clean sections!");
   } else {

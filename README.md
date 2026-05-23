@@ -44,19 +44,25 @@ To preserve swift developer feedback cycles and prevent redundant LLM invocation
 ### 2. 🔍 Transitive Dataflow & Taint Analysis
 Standard static analysis tools frequently generate false positives due to rigid pattern matching. PR State Bug Hunter solves this through a robust scope-aware variable tracker.
 *   **Transitive Cleanup Verification:** In React `useEffect` or Vue `onMounted` hooks, if an event listener's cleanup function is assigned to a variable or intermediate handler (`const cleanup = () => ...`) and subsequently returned transitively, the AST parser backtracks through the scope tree to verify the integrity of the release mechanism, successfully neutralizing false positives.
+*   **Inner-File Sensitive Keyword Scanning:** Scans file content for sensitive terms (e.g. `creditCard`, `cvv`, `password`, `jwt`, `api_key`, `billing`, and `balance`). Any detected state warning inside these files is automatically escalated to **HIGH** severity.
 
 ### 3. 🌐 Polyglot Framework AST Walkers (React, Svelte, Vue)
 Rather than relying on basic regex string matching, the parser performs native AST transformations across multiple component paradigms:
-*   **React:** Intercepts `useEffect` async anti-patterns, missing teardowns, unshielded race conditions on unmounted targets, and stale state closures.
+*   **React:** Intercepts `useEffect` async anti-patterns, missing teardowns, unshielded race conditions on unmounted targets, direct React state mutations, and stale state closures.
 *   **Svelte:** Parses `.svelte` file templates to isolate `<script>` blocks, detecting manual store `.subscribe` leaks neglected in `onDestroy`.
 *   **Vue:** Analyzes Vue Composition API (`<script setup>`) to verify event listeners and intervals registered inside `onMounted` are systematically purged in `onUnmounted` or `onBeforeUnmount`.
 
-### 4. 🤖 Slash-Command Automated Remediation (`/fix`)
+### 4. 🛠️ Local Configuration (`bug-hunter.config.json`)
+Manage rules and scanner boundaries precisely inside your repository with a JSON configuration file.
+*   **Folder/File Exclusions:** Define glob patterns inside the `exclude` array to skip scanning legacy folders, third-party libraries, or testing directories.
+*   **Custom Rules Management:** Turn rules `on` or `off` to calibrate standard static warnings to your team's style.
+
+### 5. 🤖 Slash-Command Automated Remediation (`/fix`)
 Enables direct, closed-loop code refactoring directly from the GitHub code review interface.
 *   **GitHub Comment Listener:** Submitting a comment containing `/fix` (or `/fix <line>`) on a PR triggers the action to check out the target branch, apply the AI-proposed refactoring patch, and commit the secure code changes **directly back to the repository branch**.
 *   **CLI Simulation:** Developers can simulate and apply these patches locally by executing `node test-local.js --fix <line>` in their terminal.
 
-### 5. 📊 Telemetry and Continuous Refinement
+### 6. 📊 Telemetry and Continuous Refinement
 All diagnostic runs and validation metadata are recorded locally in `.bug-hunter-telemetry.json`. In GitHub environments, the action monitors developer sentiment (e.g., negative reactions like 👎) to automatically flag potential false positives, enabling data-driven refinement of the underlying semantic rules.
 
 ---
@@ -65,15 +71,17 @@ All diagnostic runs and validation metadata are recorded locally in `.bug-hunter
 
 The AST parser identifies structural anomalies mapped to specific concurrency rules, which are subsequently audited semantically by the AI engine:
 
-| Rule Identifier | Target Framework | Vulnerability Signature & Concurrency Risk |
-| :--- | :--- | :--- |
-| **`EFFECT_DIRECT_ASYNC`** | React | `useEffect(async () => ...)` implementation. Prevents synchronous cleanup execution, exposing the component to memory leaks during rapid unmounts. |
-| **`EFFECT_UNCLEANED_SUBSCRIPTION`** | React | Subscriptions, event listeners, or timers created inside `useEffect` lacking an explicit cleanup callback return. |
-| **`EFFECT_UNGUARDED_ASYNC`** | React / Vue | Asynchronous operations (`fetch`/`axios`) executed without mount guards (`AbortController` or active flags), risking stale state mutation on unmounted DOM nodes. |
-| **`STALE_ASYNC_STATE_UPDATE`** | React | Stale closure hazard where async resolutions write state using variables directly rather than utilizing functional state updates (`setState(prev => ...)`). |
-| **`SVELTE_UNCLEANED_SUBSCRIBE`** | Svelte | Manual store subscriptions (`store.subscribe`) executed without storing the unsubscribe handler or omitting its invocation in `onDestroy`. |
-| **`VUE_UNCLEANED_ONMOUNTED`** | Vue | Event listeners or intervals established in `onMounted` Composition hooks that are not systematically cleared inside `onUnmounted`. |
-| **`UNFRAMED_STREAM_DATA`** | Node.js / Agnostic | Stream `data` event handlers (`socket.on('data')`) executing direct `JSON.parse` operations without handling message framing boundaries, causing crashes on split packets. |
+| Rule Identifier | Target Framework | Vulnerability Signature & Concurrency Risk | Severity |
+| :--- | :--- | :--- | :--- |
+| **`EFFECT_DIRECT_ASYNC`** | React | `useEffect(async () => ...)` implementation. Prevents synchronous cleanup execution, exposing the component to memory leaks during rapid unmounts. | **HIGH** |
+| **`EFFECT_UNCLEANED_SUBSCRIPTION`** | React | Subscriptions, event listeners, or timers created inside `useEffect` lacking an explicit cleanup callback, or having a mismatched event name/handler reference. | **HIGH** |
+| **`REACT_DIRECT_STATE_MUTATION`** | React | Direct modifications of React state variables (e.g., calling `items.push(...)` or `items[index] = value` directly) instead of using the state setter. | **HIGH** |
+| **`EFFECT_UNGUARDED_ASYNC`** | React / Vue | Asynchronous operations (`fetch`/`axios`) executed without mount guards (`AbortController` or active flags), risking stale state mutation on unmounted DOM nodes. | **MEDIUM** |
+| **`UNBOUNDED_LOOP_ASYNCHRONY`** | React / Vue / JS | Unbounded loop constructs (`map`, `forEach`) executing async callbacks directly without concurrency limitations or await batching. | **MEDIUM** |
+| **`STALE_ASYNC_STATE_UPDATE`** | React | Stale closure hazard where async resolutions write state using variables directly rather than utilizing functional state updates (`setState(prev => ...)`). | **MEDIUM** |
+| **`SVELTE_UNCLEANED_SUBSCRIBE`** | Svelte | Manual store subscriptions (`store.subscribe`) executed without storing the unsubscribe handler or omitting its invocation in `onDestroy`. | **HIGH** |
+| **`VUE_UNCLEANED_ONMOUNTED`** | Vue | Event listeners or intervals established in `onMounted` Composition hooks that are not systematically cleared inside `onUnmounted`. | **HIGH** |
+| **`UNFRAMED_STREAM_DATA`** | Node.js / Agnostic | Stream `data` event handlers (`socket.on('data')`) executing direct `JSON.parse` operations without handling message framing boundaries, causing crashes on split packets. | **HIGH** |
 
 ---
 
@@ -145,17 +153,31 @@ GEMINI_API_KEY=YOUR_GEMINI_API_KEY
 LOCAL_AI_BASE_URL=http://localhost:11434/v1
 LOCAL_MODEL_NAME=qwen2.5-coder
 ```
-> [!NOTE]  
-> * The internal multi-provider client automatically detects the `'sk-'` prefix in `GEMINI_API_KEY` (or if you use `OPENAI_API_KEY`), seamlessly routing requests to OpenAI's REST endpoints instead of Google Gemini.
-> * If `LOCAL_AI_BASE_URL` is defined, the tool operates entirely locally without sending any data to cloud services. Highly recommended for offline development or proprietary code privacy.
 
-### 3. Run the Verification Suite
+### 3. Create Custom Configuration File (`bug-hunter.config.json`)
+You can define custom path excludes and rule settings:
+```json
+{
+  "exclude": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/tests/**"
+  ],
+  "rules": {
+    "REACT_DIRECT_STATE_MUTATION": "on",
+    "UNBOUNDED_LOOP_ASYNCHRONY": "on",
+    "EFFECT_UNCLEANED_SUBSCRIPTION": "on"
+  }
+}
+```
+
+### 4. Run the Verification Suite
 Execute the local test runner to run React, Svelte, Vue AST scans, taint tracking checks, and AI semantic cache hits:
 ```bash
 node test-local.js
 ```
 
-### 4. Execute Simulated Automated Refactoring (Auto-Fix CLI)
+### 5. Execute Simulated Automated Refactoring (Auto-Fix CLI)
 To test the automated patching mechanism on a specific mutated line in your mock files:
 ```bash
 node test-local.js --fix 24
@@ -174,6 +196,7 @@ pr-state-bug-hunter/
 │   ├── analyzer/
 │   │   ├── astParser.js          # Babel AST walkers and transitive taint tracker
 │   │   ├── cacheManager.js       # SHA-256 cryptographic caching engine
+│   │   ├── dependencyGraph.js    # Scope dependency building & high-risk taint tracker
 │   │   └── diffParser.js         # Unified diff parser & changed line mapper
 │   ├── github/
 │   │   └── octokitClient.js      # Octokit integration for PR reviews & auto-fixes
@@ -183,6 +206,7 @@ pr-state-bug-hunter/
 │   ├── buggySvelte.svelte        # Svelte manual subscription leak test case
 │   └── buggyVue.vue              # Vue Composition listener & interval leak test case
 ├── action.yml                    # GitHub Action interface declaration
+├── bug-hunter.config.json        # Default exclude and rule config mapping
 ├── test-local.js                 # Local test runner & CLI auto-fix simulator
 ├── package.json
 └── README.md

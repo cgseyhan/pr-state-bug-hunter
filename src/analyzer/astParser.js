@@ -1,6 +1,7 @@
 import * as parser from '@babel/parser';
 import _traverse from '@babel/traverse';
 import path from 'path';
+import fs from 'fs';
 import { buildDependencyGraph, findPathToHighRisk } from './dependencyGraph.js';
 const traverse = _traverse.default || _traverse;
 
@@ -40,8 +41,28 @@ function preprocessVueSvelte(code) {
  * @param {string} filePath - The path of the file being analyzed.
  * @returns {Array<{line: number, ruleId: string, message: string, severity: 'LOW'|'MEDIUM'|'HIGH'}>} Array of structural warnings.
  */
-export function analyzeCodeAST(code, filePath) {
+export function analyzeCodeAST(code, filePath, config = null) {
+  if (!config) {
+    try {
+      if (fs.existsSync('bug-hunter.config.json')) {
+        config = JSON.parse(fs.readFileSync('bug-hunter.config.json', 'utf8'));
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }
+  if (!config) {
+    config = {};
+  }
+
   const warnings = [];
+  const originalPush = warnings.push;
+  warnings.push = function(warning) {
+    if (config && config.rules && config.rules[warning.ruleId] === 'off') {
+      return;
+    }
+    originalPush.call(warnings, warning);
+  };
 
   // Determine file extension plugins
   const plugins = ['jsx'];
@@ -280,6 +301,28 @@ export function analyzeCodeAST(code, filePath) {
           }
         }
       }
+
+      // --- RULE: Unbounded async loop execution ---
+      const isLoopMethod = (
+        callee.type === 'MemberExpression' &&
+        callee.property.type === 'Identifier' &&
+        ['forEach', 'map', 'filter', 'every', 'some'].includes(callee.property.name)
+      );
+      if (isLoopMethod && node.arguments.length > 0) {
+        const callback = node.arguments[0];
+        if (
+          callback &&
+          (callback.type === 'ArrowFunctionExpression' || callback.type === 'FunctionExpression') &&
+          callback.async
+        ) {
+          warnings.push({
+            line: callback.loc?.start.line || node.loc?.start.line,
+            ruleId: 'UNBOUNDED_LOOP_ASYNCHRONY',
+            message: `Unbounded async loop execution. Calling async/await directly inside "${callee.property.name}" does not await executions sequentially or limit concurrency, which can cause network congestion or state races. Use "for...of" for sequential execution or "Promise.all" / a concurrency pooler for parallel tracking.`,
+            severity: 'MEDIUM'
+          });
+        }
+      }
     },
 
     // 2. State hooks and stale closures in async handlers, and Svelte variable assignments
@@ -320,7 +363,41 @@ export function analyzeCodeAST(code, filePath) {
           const componentScope = path.getFunctionParent();
           if (componentScope) {
             componentScope.traverse({
+              AssignmentExpression(subPath) {
+                const { left } = subPath.node;
+                if (
+                  left.type === 'MemberExpression' &&
+                  left.object.type === 'Identifier' &&
+                  left.object.name === stateVarName
+                ) {
+                  warnings.push({
+                    line: subPath.node.loc?.start.line || node.loc?.start.line,
+                    ruleId: 'REACT_DIRECT_STATE_MUTATION',
+                    message: `Direct state mutation hazard. Mutating state variable "${stateVarName}" directly ("${stateVarName}.${left.property.name || 'property'} = ...") instead of using the setter "${setterName}" will not trigger a re-render and violates React unidirectional data flow patterns.`,
+                    severity: 'HIGH'
+                  });
+                }
+              },
               CallExpression(subPath) {
+                const { callee } = subPath.node;
+                if (
+                  callee.type === 'MemberExpression' &&
+                  callee.object.type === 'Identifier' &&
+                  callee.object.name === stateVarName
+                ) {
+                  const method = callee.property.name;
+                  const mutatingMethods = ['push', 'pop', 'shift', 'unshift', 'splice', 'reverse', 'sort'];
+                  if (mutatingMethods.includes(method)) {
+                    warnings.push({
+                      line: subPath.node.loc?.start.line || node.loc?.start.line,
+                      ruleId: 'REACT_DIRECT_STATE_MUTATION',
+                      message: `Direct state mutation hazard. Calling mutating array method "${method}" directly on state variable "${stateVarName}" instead of using the setter "${setterName}" bypasses React's state tracking. Create a shallow copy first and update via the setter.`,
+                      severity: 'HIGH'
+                    });
+                  }
+                }
+
+                // Look for setters called inside async/await or .then blocks
                 // Look for setters called inside async/await or .then blocks
                 if (subPath.node.callee.name === setterName) {
                   // Verify if setter is nested in an async flow or callback
@@ -498,6 +575,9 @@ function analyzeEffectCallbackBody(callbackNode, effectNode, warnings) {
   let hasAbortController = false;
   let abortControllerName = '';
 
+  const registeredListeners = [];
+  const removedListeners = [];
+
   // Local function registry for dataflow tracking (name -> node body)
   const localFunctions = {};
 
@@ -548,6 +628,22 @@ function analyzeEffectCallbackBody(callbackNode, effectNode, warnings) {
       if (isSub) {
         hasSubscription = true;
         subscriptionName = callee.name || callee.property?.name || 'subscription';
+      }
+
+      // Track addEventListener
+      if (
+        callee.type === 'MemberExpression' &&
+        callee.property.name === 'addEventListener'
+      ) {
+        const target = callee.object.name || 'window';
+        const eventName = node.arguments[0]?.value || 'event';
+        const handler = node.arguments[1]?.name || (node.arguments[1]?.type === 'Identifier' ? node.arguments[1].name : null);
+        registeredListeners.push({ target, eventName, handler, line: node.loc?.start.line, type: 'event' });
+      }
+
+      // Track setInterval / setTimeout
+      if (callee.type === 'Identifier' && (callee.name === 'setInterval' || callee.name === 'setTimeout')) {
+        registeredListeners.push({ target: 'timer', eventName: callee.name, handler: null, line: node.loc?.start.line, type: 'timer' });
       }
     }
 
@@ -619,6 +715,23 @@ function analyzeEffectCallbackBody(callbackNode, effectNode, warnings) {
         cleanupAborts = true;
       }
 
+      // Track removeEventListener
+      if (
+        callee.type === 'MemberExpression' &&
+        callee.property.name === 'removeEventListener'
+      ) {
+        const target = callee.object.name || 'window';
+        const eventName = node.arguments[0]?.value || 'event';
+        const handler = node.arguments[1]?.name || (node.arguments[1]?.type === 'Identifier' ? node.arguments[1].name : null);
+        removedListeners.push({ target, eventName, handler, type: 'event' });
+      }
+
+      // Track clearInterval / clearTimeout
+      if (callee.type === 'Identifier' && (callee.name === 'clearInterval' || callee.name === 'clearTimeout')) {
+        const expectedTimer = callee.name === 'clearInterval' ? 'setInterval' : 'setTimeout';
+        removedListeners.push({ target: 'timer', eventName: expectedTimer, handler: null, type: 'timer' });
+      }
+
       // Taint analysis recursive trace: check if it calls a registered helper function
       if (callee.type === 'Identifier') {
         const nestedBody = localFunctions[callee.name];
@@ -650,6 +763,29 @@ function analyzeEffectCallbackBody(callbackNode, effectNode, warnings) {
       message: `Active subscription/listener ("${subscriptionName}") established inside useEffect without returning a cleanup function. This will lead to severe memory leaks and unexpected state updates after the component unmounts.`,
       severity: 'HIGH'
     });
+  }
+
+  // Detailed Event/Timer Cleanup matching check
+  if (registeredListeners.length > 0 && hasCleanupReturn) {
+    for (const listener of registeredListeners) {
+      const hasMatchingCleanup = removedListeners.some(r => 
+        r.type === listener.type &&
+        r.target === listener.target &&
+        r.eventName === listener.eventName &&
+        (!listener.handler || !r.handler || r.handler === listener.handler)
+      );
+      
+      if (!hasMatchingCleanup) {
+        warnings.push({
+          line: listener.line || effectNode.loc?.start.line,
+          ruleId: 'EFFECT_UNCLEANED_SUBSCRIPTION',
+          message: listener.type === 'event'
+            ? `Event listener for "${listener.eventName}" on "${listener.target}" added inside useEffect is not cleaned up inside the returned cleanup function, or cleanup event/handler reference is mismatched.`
+            : `Active timer created via "${listener.eventName}" inside useEffect is not cleared inside the returned cleanup function. Call clearInterval/clearTimeout to prevent memory leaks.`,
+          severity: 'HIGH'
+        });
+      }
+    }
   }
 
   // --- RULE 2: Missing Async Race Condition Guard ---

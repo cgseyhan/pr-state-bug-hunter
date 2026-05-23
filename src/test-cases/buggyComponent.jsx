@@ -140,3 +140,55 @@ export function TransitiveCleanComponent() {
   
   return <div>Transitive Clean</div>;
 }
+
+// ----------------------------------------------------
+// ⚠️ TEST CASE 6: Direct State Mutation
+// ----------------------------------------------------
+export function BuggyComponentSix() {
+  const [items, setItems] = useState([]);
+  
+  const addItemDirectly = (item) => {
+    items.push(item); // Mutation on state variable!
+  };
+  
+  const updateItemDirectly = (index, value) => {
+    items[index] = value; // Mutation on state variable member!
+  };
+
+  return <div>Items: {items.length}</div>;
+}
+
+// ----------------------------------------------------
+// ⚠️ TEST CASE 7: Mismatched Event Listener Cleanup
+// ----------------------------------------------------
+export function BuggyComponentSeven() {
+  useEffect(() => {
+    const handleScroll = () => console.log('scrolling');
+    window.addEventListener('scroll', handleScroll);
+    return () => {
+      // Removing a mismatched event!
+      window.removeEventListener('resize', handleScroll);
+    };
+  }, []);
+
+  return <div>Scroll Tracker</div>;
+}
+
+// ----------------------------------------------------
+// ⚠️ TEST CASE 8: Unbounded Async Loop
+// ----------------------------------------------------
+export function BuggyComponentEight({ ids }) {
+  const [data, setData] = useState([]);
+
+  useEffect(() => {
+    // Calling async directly inside loop map
+    ids.map(async (id) => {
+      const res = await fetch(`/api/items/${id}`);
+      const json = await res.json();
+      setData(prev => [...prev, json]);
+    });
+  }, [ids]);
+
+  return <div>Data Count: {data.length}</div>;
+}
+

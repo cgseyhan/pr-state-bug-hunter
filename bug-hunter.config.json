@@ -1,0 +1,18 @@
+{
+  "exclude": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/tests/**"
+  ],
+  "rules": {
+    "REACT_DIRECT_STATE_MUTATION": "on",
+    "UNBOUNDED_LOOP_ASYNCHRONY": "on",
+    "EFFECT_DIRECT_ASYNC": "on",
+    "EFFECT_UNCLEANED_SUBSCRIPTION": "on",
+    "EFFECT_UNGUARDED_ASYNC": "on",
+    "STALE_ASYNC_STATE_UPDATE": "on",
+    "UNFRAMED_STREAM_DATA": "on",
+    "SVELTE_UNCLEANED_SUBSCRIBE": "on",
+    "VUE_UNCLEANED_ONMOUNTED": "on"
+  }
+}

@@ -72,6 +72,23 @@ An AI-powered static & semantic review has been completed for this pull request.
 | 🤖 **AI-Verified Logical Bugs** | \`${verifiedIssues.length}\` |
 | 🛡️ **Action Status** | ${verifiedIssues.length > 0 ? '⚠️ Review Required' : '✅ Ready to Merge'} |
 
+<details>
+<summary>📈 <b>View Concurrency Security Flow Chart</b></summary>
+<br/>
+
+\`\`\`mermaid
+graph TD
+    A[PR Code Changes] -->|Babel AST Scanner| B("Detected structurally weak spots: ${astWarningsCount}")
+    B -->|Incremental Cryptographic Cache| C{Cache Hit?}
+    C -->|Yes: <5ms| D[Instant Resolution]
+    C -->|No: API Query| E[Gemini / OpenAI Agent Audit]
+    E -->|Semantic Analysis| F("Verified Bugs: ${verifiedIssues.length}")
+    D --> F
+    F -->|PR Dashboard / inline comments| G[Action Output Finished]
+\`\`\`
+
+</details>
+
 ---
 
 `;
