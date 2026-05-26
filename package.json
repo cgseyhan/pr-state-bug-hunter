@@ -1,12 +1,15 @@
 {
   "name": "pr-state-bug-hunter",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "An AI-powered GitHub Action to catch complex async state bugs and lifecycle race conditions in PRs.",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "test": "echo \"Error: no test specified\" && exit 0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:local": "node test-local.js",
     "pre-commit": "node test-local.js --pre-commit"
   },
   "keywords": [
@@ -26,5 +29,8 @@
     "@babel/traverse": "^7.29.0",
     "@google/generative-ai": "^0.24.1",
     "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.7"
   }
 }

@@ -5,12 +5,13 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { getPrChanges } from './analyzer/diffParser.js';
 import { analyzeCodeAST, verifySyntax, escalateWarnings } from './analyzer/astParser.js';
-import { huntStateBugsWithGemini } from './agents/bugHunterAgent.js';
+import { huntStateBugsWithGemini, generateCorrectionPatch } from './agents/bugHunterAgent.js';
 import { 
   postInlineReviewComments, 
   postPrSummaryComment, 
   commitFixToPrBranch,
-  postJobSummary
+  postJobSummary,
+  checkUserWritePermission
 } from './github/octokitClient.js';
 
 // Load local .env files if present (highly convenient for local tests/development)
@@ -176,6 +177,28 @@ async function run() {
 
       if (commentBody.startsWith('/fix')) {
         console.log(`📣 [Slash Command] Received fix request: "${commentBody}"`);
+
+        // ── PHASE 1: SECURITY GUARD ─────────────────────────────────────────
+        const commenterLogin = github.context.payload.comment?.user?.login;
+        if (!commenterLogin) {
+          console.warn('[Security Guard] Could not determine commenter identity. Blocking /fix command.');
+          return;
+        }
+        const hasPermission = await checkUserWritePermission(octokit, github.context, commenterLogin);
+        if (!hasPermission) {
+          const { owner, repo, number: pullNumber } = github.context.issue;
+          await octokit.rest.issues.createComment({
+            owner,
+            repo,
+            issue_number: pullNumber,
+            body: `🚫 **PR State Bug Hunter Security Guard**\n\n@${commenterLogin}, you need **write** or **admin** access to this repository to use the \`/fix\` command. Please contact a maintainer. 🛡️`
+          });
+          logTelemetry({ action: 'slash_fix_blocked', commenter: commenterLogin, reason: 'insufficient_permissions' });
+          return;
+        }
+        console.log(`[Security Guard] ✅ User "${commenterLogin}" has write access. Proceeding with /fix.`);
+        // ────────────────────────────────────────────────────────────────────
+
         const parts = commentBody.split(/\s+/);
         const lineArg = parts[1]; // e.g. "9" or "all"
 
@@ -236,20 +259,51 @@ async function run() {
             });
             const currentContent = Buffer.from(fileData.content, 'base64').toString('utf8');
 
-            const updatedContent = applyFixToText(currentContent, bug.line, bug.proposedFix);
-            if (updatedContent) {
+            // ── PHASE 2: AUTO-HEALING RETRY LOOP ────────────────────────────
+            let updatedContent = applyFixToText(currentContent, bug.line, bug.proposedFix);
+            let currentFix = bug.proposedFix;
+            const MAX_HEAL_ATTEMPTS = 3;
+
+            for (let attempt = 1; attempt <= MAX_HEAL_ATTEMPTS; attempt++) {
+              if (!updatedContent) {
+                console.warn(`[Auto-Heal] Attempt ${attempt}: Patch application failed for ${bug.filePath}:${bug.line}.`);
+                break;
+              }
+
               const syntaxCheck = verifySyntax(updatedContent, bug.filePath);
-              if (!syntaxCheck.valid) {
-                console.warn(`[Syntax Validation Failed] Auto-fix at ${bug.filePath}:${bug.line} caused a syntax error: ${syntaxCheck.error}`);
+              if (syntaxCheck.valid) {
+                console.log(`[Auto-Heal] ✅ Attempt ${attempt}: Patch is syntactically valid.`);
+                break;
+              }
+
+              if (attempt === MAX_HEAL_ATTEMPTS) {
+                console.warn(`[Auto-Heal] ❌ All ${MAX_HEAL_ATTEMPTS} healing attempts exhausted for ${bug.filePath}:${bug.line}. Syntax error: ${syntaxCheck.error}`);
                 await octokit.rest.issues.createComment({
                   owner,
                   repo,
                   issue_number: pullNumber,
-                  body: `🤖 **PR State Bug Hunter Auto-Fix Blocked!** ❌\n\nThe proposed fix for the bug on **line ${bug.line}** in \`${bug.filePath}\` was blocked because it introduces a syntax error:\n\n\`\`\`\n${syntaxCheck.error}\n\`\`\`\n\nPlease check the proposed fix and apply it manually. 🛡️`
+                  body: `🤖 **PR State Bug Hunter Auto-Fix Blocked After ${MAX_HEAL_ATTEMPTS} Repair Attempts!** ❌\n\nThe proposed fix for **line ${bug.line}** in \`${bug.filePath}\` could not be corrected after ${MAX_HEAL_ATTEMPTS} AI-guided attempts.\n\nFinal syntax error:\n\`\`\`\n${syntaxCheck.error}\n\`\`\`\n\nPlease apply the fix manually. 🛡️`
                 });
-                continue;
+                updatedContent = null;
+                break;
               }
 
+              console.log(`[Auto-Heal] 🔄 Syntax error detected on attempt ${attempt}. Asking AI to correct the patch... Error: ${syntaxCheck.error}`);
+              const correctedFix = await generateCorrectionPatch(
+                geminiApiKey,
+                currentFix,
+                syntaxCheck.error,
+                geminiModel,
+                { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
+              );
+
+              if (!correctedFix) break;
+              currentFix = correctedFix;
+              updatedContent = applyFixToText(currentContent, bug.line, correctedFix);
+            }
+            // ────────────────────────────────────────────────────────────────
+
+            if (updatedContent) {
               await commitFixToPrBranch(octokit, github.context, branchName, bug.filePath, updatedContent, bug.line);
               fixesApplied++;
 

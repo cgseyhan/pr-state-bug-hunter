@@ -3,6 +3,7 @@ import _traverse from '@babel/traverse';
 import path from 'path';
 import fs from 'fs';
 import { buildDependencyGraph, findPathToHighRisk } from './dependencyGraph.js';
+import { getPluginForFile } from './languageRegistry.js';
 const traverse = _traverse.default || _traverse;
 
 /**
@@ -42,6 +43,16 @@ function preprocessVueSvelte(code) {
  * @returns {Array<{line: number, ruleId: string, message: string, severity: 'LOW'|'MEDIUM'|'HIGH'}>} Array of structural warnings.
  */
 export function analyzeCodeAST(code, filePath, config = null) {
+  // ── Phase 4: Language Registry Delegation ─────────────────────────────────
+  // If a plugin is registered for this file extension and it's NOT the
+  // built-in JS plugin (which would cause infinite recursion), delegate to it.
+  const plugin = getPluginForFile(filePath);
+  if (plugin && plugin.name !== 'JavaScript/TypeScript') {
+    console.log(`[LanguageRegistry] Delegating "${filePath}" to plugin "${plugin.name}".`);
+    return plugin.analyze(code, filePath, config);
+  }
+  // ──────────────────────────────────────────────────────────────────────────
+
   if (!config) {
     try {
       if (fs.existsSync('bug-hunter.config.json')) {

@@ -1,6 +1,35 @@
 import core from '@actions/core';
 
 /**
+ * Checks if a GitHub user has write or admin access to the repository.
+ * Used as a security guard before executing /fix slash commands.
+ * @param {Object} octokit - The Octokit client.
+ * @param {Object} context - The GitHub Action context.
+ * @param {string} username - The GitHub username to check.
+ * @returns {Promise<boolean>} True if the user has write or admin permission.
+ */
+export async function checkUserWritePermission(octokit, context, username) {
+  const { owner, repo } = context.issue;
+  try {
+    const { data } = await octokit.rest.repos.getCollaboratorPermissionLevel({
+      owner,
+      repo,
+      username
+    });
+    const level = data.permission;
+    const hasAccess = level === 'admin' || level === 'write';
+    if (!hasAccess) {
+      console.warn(`[Security Guard] User "${username}" attempted /fix but only has "${level}" permission. Blocking.`);
+    }
+    return hasAccess;
+  } catch (err) {
+    // If not a collaborator at all, the API throws a 404
+    console.warn(`[Security Guard] Could not verify permission for "${username}": ${err.message}. Blocking command.`);
+    return false;
+  }
+}
+
+/**
  * Creates inline PR review comments for verified issues.
  * If an inline comment fails due to diff hunk alignment, it falls back gracefully without breaking execution.
  * @param {Object} octokit - The Octokit client.
@@ -14,6 +43,10 @@ export async function postInlineReviewComments(octokit, context, commitSha, issu
   console.log(`Posting ${issues.length} inline review comments on PR #${pull_number}...`);
 
   for (const issue of issues) {
+    const testBlock = issue.proposedTest
+      ? `\n<details>\n<summary>🧪 <b>Suggested Unit Test (Reproduce &amp; Guard this bug)</b></summary>\n\n${issue.proposedTest}\n</details>`
+      : '';
+
     const commentBody = `
 ### 🤖 PR State Bug Hunter Warning 🛡️
 
@@ -23,9 +56,9 @@ export async function postInlineReviewComments(octokit, context, commitSha, issu
 **Analysis:**
 ${issue.explanation}
 
-${issue.proposedFix ? `**Proposed Fix:**\n${issue.proposedFix}` : ''}
+${issue.proposedFix ? `**Proposed Fix:**\n${issue.proposedFix}` : ''}${testBlock}
 
-_Review conducted by PR State Bug Hunter AI. Please verify logical context before applying changes._
+_Review conducted by PR State Bug Hunter AI. Comment \`/fix ${issue.line}\` to auto-apply the patch. Please verify logical context before applying changes._
 `;
 
     try {
@@ -122,13 +155,17 @@ Below is the breakdown of the **${verifiedIssues.length}** issues detected by ou
 `;
 
       for (const issue of fileIssues) {
+        const testSection = issue.proposedTest
+          ? `\n<details>\n<summary>🧪 <b>Suggested Unit Test</b></summary>\n\n${issue.proposedTest}\n</details>\n`
+          : '';
+
         summaryBody += `
 ##### ⚠️ Line ${issue.line}: \`${issue.ruleId}\` (${issue.severity === 'HIGH' ? '🔴 HIGH' : issue.severity === 'MEDIUM' ? '🟡 MEDIUM' : '🟢 LOW'})
 
 * **Explanation:** 
   ${issue.explanation}
 
-${issue.proposedFix ? `* **Proposed Fix:**\n${issue.proposedFix}` : ''}
+${issue.proposedFix ? `* **Proposed Fix:**\n${issue.proposedFix}` : ''}${testSection}
 
 ---
 `;

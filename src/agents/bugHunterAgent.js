@@ -255,6 +255,7 @@ ${JSON.stringify(warningContexts, null, 2)}
 2. Determine if it is a "real bug" (\`isRealBug: true\`) or a false positive (\`isRealBug: false\`).
 3. For verified bugs, provide a clear, professional, and empathetic explanation explaining exactly *how* the race condition, stale state, memory leak, or buffering error occurs.
 4. Provide a high-quality \`proposedFix\` formatted as a complete drop-in replacement code block (only the corrected lines/block, not the entire file) that should replace the entire \`codeSnippet\` context block.
+5. Provide a \`proposedTest\` field containing a minimal unit test (Jest/Vitest syntax) that reproduces the bug and verifies the fix. Wrap it in a fenced markdown code block.
 
 Return your response strictly as a JSON array of objects with this structure (no conversational text outside the array):
 [
@@ -264,7 +265,8 @@ Return your response strictly as a JSON array of objects with this structure (no
     "isRealBug": true,
     "severity": "HIGH",
     "explanation": "Why this is a bug, the async workflow failure mode, and its impact.",
-    "proposedFix": "Code block that drops in to replace the entire codeSnippet context block"
+    "proposedFix": "Code block that drops in to replace the entire codeSnippet context block",
+    "proposedTest": "\`\`\`js\ntest('describes the bug scenario', () => { /* minimal reproduction */ });\n\`\`\`"
   }
 ]
 `;
@@ -297,7 +299,8 @@ Return your response strictly as a JSON array of objects with this structure (no
               isRealBug: item.isRealBug,
               severity: item.severity || 'MEDIUM',
               explanation: item.explanation,
-              proposedFix: item.proposedFix
+              proposedFix: item.proposedFix,
+              proposedTest: item.proposedTest || null
             });
 
             if (item.isRealBug) {
@@ -307,7 +310,8 @@ Return your response strictly as a JSON array of objects with this structure (no
                 ruleId: item.ruleId,
                 severity: item.severity || 'MEDIUM',
                 explanation: item.explanation,
-                proposedFix: item.proposedFix
+                proposedFix: item.proposedFix,
+                proposedTest: item.proposedTest || null
               });
             }
           }
@@ -353,6 +357,7 @@ ${change.patch}
 ### Task Instructions:
 Identify any critical logical concurrency or state-flow bugs introduced in this diff. If none exist, return an empty array.
 If bugs are found, return a JSON array containing the details.
+For each bug, also include a \`proposedTest\` field: a minimal Jest/Vitest unit test (in a fenced markdown code block) that reproduces the bug and validates the fix.
 
 Return your response strictly as a JSON array of objects with this structure (no conversational text outside the array):
 [
@@ -362,7 +367,8 @@ Return your response strictly as a JSON array of objects with this structure (no
     "isRealBug": true,
     "severity": "MEDIUM",
     "explanation": "Description of why there is a race condition or state conflict.",
-    "proposedFix": "Corrected code block or diff"
+    "proposedFix": "Corrected code block or diff",
+    "proposedTest": "\`\`\`js\ntest('reproduces the bug', () => { /* ... */ });\n\`\`\`"
   }
 ]
 `;
@@ -395,7 +401,8 @@ Return your response strictly as a JSON array of objects with this structure (no
                 ruleId: item.ruleId || 'GENERAL_ASYNC_BUG',
                 severity: item.severity || 'MEDIUM',
                 explanation: item.explanation,
-                proposedFix: item.proposedFix
+                proposedFix: item.proposedFix,
+                proposedTest: item.proposedTest || null
               });
             }
           }
@@ -410,3 +417,79 @@ Return your response strictly as a JSON array of objects with this structure (no
   return verifiedIssues;
 }
 
+/**
+ * Phase 2 — Auto-Healing: Asks the AI model to correct a patch that caused a syntax error.
+ * Used by the /fix retry loop when the proposed fix fails syntax verification.
+ *
+ * @param {string} apiKey - Gemini or OpenAI API key.
+ * @param {string} brokenPatch - The patch string that introduced a syntax error.
+ * @param {string} syntaxError - The syntax error message from the validator.
+ * @param {string} modelName - The AI model name to use.
+ * @param {Object} localOptions - Optional local AI configuration {apiBaseUrl, modelName}.
+ * @returns {Promise<string|null>} The corrected patch string, or null if it failed.
+ */
+export async function generateCorrectionPatch(apiKey, brokenPatch, syntaxError, modelName = 'gemini-1.5-flash', localOptions = {}) {
+  const localBaseUrl = localOptions.apiBaseUrl || process.env.LOCAL_AI_BASE_URL;
+  const localModel = localOptions.modelName || process.env.LOCAL_MODEL_NAME;
+  const isLocalAI = !!localBaseUrl;
+  const isOpenAI = apiKey ? apiKey.startsWith('sk-') : false;
+
+  let actualModel = modelName;
+  if (isLocalAI) {
+    actualModel = localModel || modelName || 'llama3';
+  } else if (isOpenAI) {
+    actualModel = modelName === 'gemini-1.5-flash' ? 'gpt-4o-mini' : modelName;
+  }
+
+  const prompt = `
+You are an expert software engineer. A code patch was generated that introduces a syntax error.
+
+### Broken Patch:
+\`\`\`
+${brokenPatch}
+\`\`\`
+
+### Syntax Error Detected:
+\`\`\`
+${syntaxError}
+\`\`\`
+
+### Task:
+Fix the patch so it is syntactically valid JavaScript/TypeScript.
+Return ONLY the corrected code block — no explanations, no markdown fences, no additional text.
+The output must be the corrected replacement code only.
+`;
+
+  try {
+    let text = '';
+    if (isLocalAI || isOpenAI) {
+      const apiBase = localBaseUrl || 'https://api.openai.com/v1';
+      const key = apiKey || 'local-key';
+      // For correction, we want plain text output, not JSON, so we use a generic fetch
+      const base = apiBase.endsWith('/') ? apiBase.slice(0, -1) : apiBase;
+      const response = await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body: JSON.stringify({
+          model: actualModel,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.05
+        })
+      });
+      const data = await response.json();
+      text = data.choices[0]?.message?.content || '';
+    } else {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: actualModel });
+      const result = await model.generateContent(prompt);
+      text = result.response.text();
+    }
+
+    // Strip accidental markdown fences from the response
+    text = cleanJsonResponse(text);
+    return text.trim() || null;
+  } catch (err) {
+    console.error(`[Auto-Heal] generateCorrectionPatch failed: ${err.message}`);
+    return null;
+  }
+}
