@@ -36,7 +36,10 @@ vi.mock('@google/generative-ai', () => {
       return { generateContent: mockGenerateContent };
     }
   }
-  return { GoogleGenerativeAI: MockGoogleGenerativeAI };
+  return { 
+    GoogleGenerativeAI: MockGoogleGenerativeAI,
+    SchemaType: { ARRAY: 'ARRAY', OBJECT: 'OBJECT', NUMBER: 'NUMBER', STRING: 'STRING', BOOLEAN: 'BOOLEAN' }
+  };
 });
 
 const { huntStateBugsWithGemini, generateCorrectionPatch } =
@@ -192,6 +195,49 @@ describe('huntStateBugsWithGemini – Gemini AI path', () => {
 
     const result = await huntStateBugsWithGemini('AIza-fake', changes, warnings);
     expect(result).toEqual([]);
+  });
+
+  it('performs general diff scan when no AST warnings are present', async () => {
+    mockGenerateContent.mockResolvedValueOnce({
+      response: {
+        text: () => JSON.stringify([{
+          isRealBug: true,
+          line: 12,
+          ruleId: 'GENERAL_ASYNC_BUG',
+          severity: 'HIGH',
+          explanation: 'Found leak in diff',
+          proposedFix: 'Fix leak'
+        }])
+      }
+    });
+
+    const prChanges = [{ path: 'src/clean.jsx', changedLines: [12], patch: '@@ -1 +1 @@\n+clean' }];
+    const astWarnings = []; // NO AST WARNINGS
+    
+    const results = await huntStateBugsWithGemini('AIza-fake', prChanges, astWarnings);
+    expect(results).toHaveLength(1);
+    expect(results[0].ruleId).toBe('GENERAL_ASYNC_BUG');
+    expect(results[0].explanation).toBe('Found leak in diff');
+  });
+
+  it('uses cached general diff scan results', async () => {
+    const prChanges = [{ path: 'src/cached-clean.jsx', changedLines: [15], patch: '@@ -1 +1 @@\n+cached' }];
+    const astWarnings = [];
+    
+    const hash = calculateWarningHash('src/cached-clean.jsx', 0, 'GENERAL_DIFF_SCAN', prChanges[0].patch);
+    setCachedFinding(hash, [{
+      isRealBug: true,
+      line: 15,
+      ruleId: 'GENERAL_ASYNC_BUG',
+      severity: 'LOW',
+      explanation: 'Cached leak',
+      proposedFix: 'Cached fix'
+    }]);
+
+    const results = await huntStateBugsWithGemini('AIza-fake', prChanges, astWarnings);
+    expect(results).toHaveLength(1);
+    expect(results[0].explanation).toBe('Cached leak');
+    expect(mockGenerateContent).not.toHaveBeenCalled();
   });
 });
 

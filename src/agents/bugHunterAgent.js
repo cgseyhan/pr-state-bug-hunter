@@ -1,7 +1,46 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import fs from 'fs/promises';
 import path from 'path';
+import * as parser from '@babel/parser';
+import _traverse from '@babel/traverse';
 import { calculateWarningHash, getCachedFinding, setCachedFinding } from '../analyzer/cacheManager.js';
+
+const traverse = _traverse.default || _traverse;
+
+const issueSchemaJson = {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      line: { type: "number" },
+      ruleId: { type: "string" },
+      isRealBug: { type: "boolean" },
+      severity: { type: "string" },
+      explanation: { type: "string" },
+      proposedFix: { type: "string" },
+      proposedTest: { type: "string" }
+    },
+    required: ["line", "ruleId", "isRealBug", "severity", "explanation", "proposedFix"],
+    additionalProperties: false
+  }
+};
+
+const issueSchemaGemini = {
+  type: SchemaType.ARRAY,
+  items: {
+    type: SchemaType.OBJECT,
+    properties: {
+      line: { type: SchemaType.NUMBER },
+      ruleId: { type: SchemaType.STRING },
+      isRealBug: { type: SchemaType.BOOLEAN },
+      severity: { type: SchemaType.STRING },
+      explanation: { type: SchemaType.STRING },
+      proposedFix: { type: SchemaType.STRING },
+      proposedTest: { type: SchemaType.STRING }
+    },
+    required: ["line", "ruleId", "isRealBug", "severity", "explanation", "proposedFix"]
+  }
+};
 
 /**
  * Reads a file from the workspace or falls back to patch context.
@@ -21,20 +60,56 @@ async function getFileContent(filePath) {
 
 /**
  * Extracts a code block surrounding the target line number for LLM context.
+ * Uses AST parsing to extract the entire enclosing function for semantic context when possible.
  * @param {string} code - The full source code.
  * @param {number} targetLine - The line number to center the context around.
- * @param {number} contextWindow - Number of lines to include before and after.
+ * @param {number} contextWindow - Number of lines to include before and after if AST fails.
  * @returns {string} Fenced code block with context.
  */
 function getLineContext(code, targetLine, contextWindow = 15) {
+  let startLine = Math.max(0, targetLine - 1 - contextWindow);
+  let endLine = targetLine + contextWindow;
+
+  try {
+    const ast = parser.parse(code, {
+      sourceType: 'module',
+      plugins: ['jsx', 'typescript', 'flow'],
+      allowImportExportEverywhere: true,
+      allowReturnOutsideFunction: true
+    });
+
+    let bestMatch = null;
+    traverse(ast, {
+      enter(path) {
+        if (
+          path.isFunction() ||
+          path.isClassMethod() ||
+          path.isObjectMethod()
+        ) {
+          const loc = path.node.loc;
+          if (loc && loc.start.line <= targetLine && loc.end.line >= targetLine) {
+            if (!bestMatch || (loc.end.line - loc.start.line < bestMatch.end.line - bestMatch.start.line)) {
+              bestMatch = loc;
+            }
+          }
+        }
+      }
+    });
+
+    if (bestMatch) {
+      startLine = Math.max(0, bestMatch.start.line - 1 - 2); // 2 lines buffer
+      endLine = bestMatch.end.line + 2;
+    }
+  } catch (err) {
+    // Fallback to strictly window based context if parsing fails (e.g., raw Svelte/Vue)
+  }
+
   const lines = code.split('\n');
   const totalLines = lines.length;
-
-  const start = Math.max(0, targetLine - 1 - contextWindow);
-  const end = Math.min(totalLines, targetLine + contextWindow);
+  endLine = Math.min(totalLines, endLine);
 
   const contextLines = [];
-  for (let i = start; i < end; i++) {
+  for (let i = startLine; i < endLine; i++) {
     const lineNum = i + 1;
     const isTarget = lineNum === targetLine;
     const prefix = isTarget ? '>> ' : '   ';
@@ -46,8 +121,6 @@ function getLineContext(code, targetLine, contextWindow = 15) {
 
 /**
  * Clean text if LLM wrapped it in markdown code blocks.
- * Only strips outer backticks if they truly wrap the entire response,
- * protecting any nested markdown code blocks (e.g. proposedFix diffs).
  */
 function cleanJsonResponse(text) {
   let cleaned = text.trim();
@@ -66,8 +139,7 @@ function cleanJsonResponse(text) {
 }
 
 /**
- * Robustly extracts an array from a JSON parsed response,
- * handling both direct arrays and arrays wrapped in a JSON object.
+ * Robustly extracts an array from a JSON parsed response.
  */
 function extractIssuesArray(jsonResponse) {
   if (Array.isArray(jsonResponse)) {
@@ -79,7 +151,6 @@ function extractIssuesArray(jsonResponse) {
     if (Array.isArray(jsonResponse.response)) return jsonResponse.response;
     if (Array.isArray(jsonResponse.warnings)) return jsonResponse.warnings;
     
-    // Fallback: search for any array field
     for (const key of Object.keys(jsonResponse)) {
       if (Array.isArray(jsonResponse[key])) {
         return jsonResponse[key];
@@ -95,6 +166,26 @@ function extractIssuesArray(jsonResponse) {
 async function callOpenAI(apiKey, prompt, modelName = 'gpt-4o-mini', apiBaseUrl = 'https://api.openai.com/v1') {
   try {
     const base = apiBaseUrl.endsWith('/') ? apiBaseUrl.slice(0, -1) : apiBaseUrl;
+    
+    // For OpenAI's structured outputs via json_schema
+    const isGptModel = modelName.includes('gpt-4o');
+    const responseFormat = isGptModel ? {
+      type: "json_schema",
+      json_schema: {
+        name: "bug_report_array",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            issues: issueSchemaJson
+          },
+          required: ["issues"],
+          additionalProperties: false
+        }
+      }
+    } : { type: 'json_object' };
+
+    // If using json_schema, we expect the LLM to return { "issues": [...] }
     const response = await fetch(`${base}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -103,11 +194,11 @@ async function callOpenAI(apiKey, prompt, modelName = 'gpt-4o-mini', apiBaseUrl 
       },
       body: JSON.stringify({
         model: modelName,
-        response_format: { type: 'json_object' },
+        response_format: responseFormat,
         messages: [
           {
             role: 'system',
-            content: 'You are an elite software architect and security auditor specializing in code auditing. You must respond strictly in JSON format.'
+            content: 'You are an elite software architect and security auditor. You must respond strictly in JSON format.'
           },
           {
             role: 'user',
@@ -132,12 +223,7 @@ async function callOpenAI(apiKey, prompt, modelName = 'gpt-4o-mini', apiBaseUrl 
 }
 
 /**
- * Invokes either Gemini or OpenAI model dynamically to analyze code snippets and diffs for asynchronous state bugs and race conditions.
- * @param {string} apiKey - API Key (Gemini or OpenAI starting with 'sk-').
- * @param {Array<{path: string, patch: string, changedLines: number[]}>} changes - File changes.
- * @param {Array<{line: number, ruleId: string, message: string, severity: string, path: string}>} astWarnings - AST warnings.
- * @param {string} modelName - Model name to use (defaults to gemini-1.5-flash or gpt-4o-mini depending on key).
- * @returns {Promise<Array<{filePath: string, line: number, ruleId: string, isRealBug: boolean, severity: string, explanation: string, proposedFix: string}>>}
+ * Invokes either Gemini or OpenAI model dynamically to analyze code snippets.
  */
 export async function huntStateBugsWithGemini(apiKey, changes, astWarnings, modelName = 'gemini-1.5-flash', localOptions = {}) {
   const localBaseUrl = localOptions.apiBaseUrl || process.env.LOCAL_AI_BASE_URL;
@@ -168,7 +254,8 @@ export async function huntStateBugsWithGemini(apiKey, changes, astWarnings, mode
     geminiModel = genAI.getGenerativeModel({
       model: actualModel,
       generationConfig: {
-        responseMimeType: 'application/json'
+        responseMimeType: 'application/json',
+        responseSchema: issueSchemaGemini
       }
     });
   }

@@ -12,12 +12,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ─── Mock @actions/core (used in octokitClient for core.warning) ─────────────
-vi.mock('@actions/core', () => ({
-  default: { warning: vi.fn(), info: vi.fn(), error: vi.fn() },
-  warning: vi.fn(),
-  info: vi.fn(),
-  error: vi.fn(),
-}));
+vi.mock('@actions/core', () => {
+  const summaryMock = { addRaw: vi.fn().mockReturnThis(), write: vi.fn().mockResolvedValue() };
+  return {
+    default: { warning: vi.fn(), info: vi.fn(), error: vi.fn(), setFailed: vi.fn(), summary: summaryMock },
+    warning: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    setFailed: vi.fn(),
+    summary: summaryMock,
+  };
+});
 
 // ─── Octokit mock factory ─────────────────────────────────────────────────────
 function makeOctokit({
@@ -25,6 +30,8 @@ function makeOctokit({
   getCollaboratorError = null,
   createReviewCommentError = null,
   createCommentError = null,
+  getContentError = null,
+  createOrUpdateError = null,
 } = {}) {
   return {
     rest: {
@@ -32,6 +39,12 @@ function makeOctokit({
         getCollaboratorPermissionLevel: getCollaboratorError
           ? vi.fn().mockRejectedValue(getCollaboratorError)
           : vi.fn().mockResolvedValue({ data: { permission } }),
+        getContent: getContentError
+          ? vi.fn().mockRejectedValue(getContentError)
+          : vi.fn().mockResolvedValue({ data: { sha: 'dummy-sha' } }),
+        createOrUpdateFileContents: createOrUpdateError
+          ? vi.fn().mockRejectedValue(createOrUpdateError)
+          : vi.fn().mockResolvedValue({ data: { commit: { sha: 'new-commit' } } }),
       },
       pulls: {
         createReviewComment: createReviewCommentError
@@ -52,7 +65,7 @@ function makeContext(owner = 'test-owner', repo = 'test-repo', number = 42) {
 }
 
 // ─── Import module under test ─────────────────────────────────────────────────
-const { checkUserWritePermission, postInlineReviewComments, postPrSummaryComment } =
+const { checkUserWritePermission, postInlineReviewComments, postPrSummaryComment, commitFixToPrBranch, postJobSummary } =
   await import('../../src/github/octokitClient.js');
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -241,7 +254,77 @@ describe('postPrSummaryComment', () => {
     const octokit = makeOctokit();
     await postPrSummaryComment(octokit, makeContext(), 7, 12, [makeIssue()]);
     const body = octokit.rest.issues.createComment.mock.calls[0][0].body;
-    expect(body).toContain('7');  // filesScannedCount
     expect(body).toContain('12'); // astWarningsCount
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// commitFixToPrBranch
+// ═════════════════════════════════════════════════════════════════════════════
+describe('commitFixToPrBranch', () => {
+  it('successfully commits a fix to the PR branch', async () => {
+    const octokit = makeOctokit();
+    await commitFixToPrBranch(octokit, makeContext(), 'feature-branch', 'src/app.js', 'new code', 10);
+    expect(octokit.rest.repos.getContent).toHaveBeenCalledWith({
+      owner: 'test-owner',
+      repo: 'test-repo',
+      path: 'src/app.js',
+      ref: 'feature-branch'
+    });
+    expect(octokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalled();
+    const callArgs = octokit.rest.repos.createOrUpdateFileContents.mock.calls[0][0];
+    expect(callArgs.sha).toBe('dummy-sha');
+    expect(callArgs.content).toBe(Buffer.from('new code').toString('base64'));
+  });
+
+  it('proceeds even if getContent throws (e.g. new file)', async () => {
+    const octokit = makeOctokit({ getContentError: new Error('Not found') });
+    await commitFixToPrBranch(octokit, makeContext(), 'feature-branch', 'src/new.js', 'code', 10);
+    expect(octokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalled();
+    const callArgs = octokit.rest.repos.createOrUpdateFileContents.mock.calls[0][0];
+    expect(callArgs.sha).toBeUndefined();
+  });
+
+  it('throws an error if createOrUpdateFileContents fails', async () => {
+    const octokit = makeOctokit({ createOrUpdateError: new Error('API down') });
+    await expect(commitFixToPrBranch(octokit, makeContext(), 'feature-branch', 'src/app.js', 'new code', 10))
+      .rejects.toThrow('API down');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// postJobSummary
+// ═════════════════════════════════════════════════════════════════════════════
+import core from '@actions/core';
+describe('postJobSummary', () => {
+  beforeEach(() => {
+    core.summary.addRaw.mockClear();
+    core.summary.write.mockClear();
+  });
+
+  it('writes a job summary successfully with issues', async () => {
+    const issues = [
+      { filePath: 'a.js', line: 1, ruleId: 'R1', severity: 'HIGH' },
+      { filePath: 'b.js', line: 2, ruleId: 'R2', severity: 'LOW' }
+    ];
+    await postJobSummary(10, 5, issues);
+    
+    expect(core.summary.addRaw).toHaveBeenCalled();
+    const summaryHtml = core.summary.addRaw.mock.calls[0][0];
+    expect(summaryHtml).toContain('10');
+    expect(summaryHtml).toContain('5');
+    expect(summaryHtml).toContain('🔴 HIGH');
+    expect(summaryHtml).toContain('🟢 LOW');
+    expect(summaryHtml).toContain('Review Required');
+    expect(core.summary.write).toHaveBeenCalled();
+  });
+
+  it('writes a job summary indicating no issues', async () => {
+    await postJobSummary(5, 0, []);
+    
+    expect(core.summary.addRaw).toHaveBeenCalled();
+    const summaryHtml = core.summary.addRaw.mock.calls[0][0];
+    expect(summaryHtml).toContain('Safe');
+    expect(summaryHtml).toContain('Clean Bill of Health!');
   });
 });

@@ -24,8 +24,26 @@ inputs:
     description: 'Optional model name for Local AI (e.g. deepseek-coder, qwen2.5-coder).'
     required: false
 runs:
-  using: 'node20'
-  main: 'dist/index.js'
+  using: 'composite'
+  steps:
+    - name: Cache PR State Bug Hunter Findings
+      uses: actions/cache@v4
+      with:
+        path: .bug-hunter-cache.json
+        key: bug-hunter-${{ github.repository }}-${{ github.ref }}-${{ github.sha }}
+        restore-keys: |
+          bug-hunter-${{ github.repository }}-${{ github.ref }}-
+          bug-hunter-${{ github.repository }}-
+    - name: Run PR State Bug Hunter
+      run: node ${{ github.action_path }}/dist/index.js
+      shell: bash
+      env:
+        INPUT_GITHUB-TOKEN: ${{ inputs.github-token }}
+        INPUT_GEMINI-API-KEY: ${{ inputs.gemini-api-key }}
+        INPUT_SEVERITY-THRESHOLD: ${{ inputs.severity-threshold }}
+        INPUT_AUTO-COMMENT: ${{ inputs.auto-comment }}
+        INPUT_LOCAL-AI-BASE-URL: ${{ inputs.local-ai-base-url }}
+        INPUT_LOCAL-MODEL-NAME: ${{ inputs.local-model-name }}
 branding:
   icon: 'shield'
   color: 'blue'

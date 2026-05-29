@@ -297,7 +297,7 @@ No asynchronous state leaks, stale React closures, uncleaned timers/event listen
     summaryHtml += `\n| Rule ID | File | Line | Severity |
 | :--- | :--- | :--- | :--- |
 `;
-    for (const bug of verifiedBugs) {
+    for (const bug of verifiedIssues) {
       const sevEmoji = bug.severity?.toUpperCase() === 'HIGH' ? '🔴 HIGH' : bug.severity?.toUpperCase() === 'MEDIUM' ? '🟡 MEDIUM' : '🟢 LOW';
       summaryHtml += `| \`${bug.ruleId}\` | \`${bug.filePath}\` | \`${bug.line}\` | ${sevEmoji} |\n`;
     }
