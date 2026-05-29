@@ -184,6 +184,11 @@ describe('huntStateBugsWithGemini – Gemini AI path', () => {
   });
 
   it('handles malformed JSON from AI gracefully (returns empty)', async () => {
+    // pre-filter call fails
+    mockGenerateContent.mockResolvedValueOnce({
+      response: { text: () => 'not valid json !!!' },
+    });
+    // deep analysis call also fails
     mockGenerateContent.mockResolvedValueOnce({
       response: { text: () => 'not valid json !!!' },
     });
@@ -198,6 +203,11 @@ describe('huntStateBugsWithGemini – Gemini AI path', () => {
   });
 
   it('performs general diff scan when no AST warnings are present', async () => {
+    // pre-filter says not clean
+    mockGenerateContent.mockResolvedValueOnce({
+      response: { text: () => JSON.stringify({ clean: false }) }
+    });
+    // deep analysis returns the general diff bug
     mockGenerateContent.mockResolvedValueOnce({
       response: {
         text: () => JSON.stringify([{
