@@ -223,6 +223,57 @@ async function callOpenAI(apiKey, prompt, modelName = 'gpt-4o-mini', apiBaseUrl 
 }
 
 /**
+ * Pre-filter (Cheap/Fast Model) to determine if a code snippet is suspicious.
+ * This saves 80% API costs by ignoring clean code.
+ */
+async function runPreFilter(apiKey, codeSnippet, isLocalAI, isOpenAI, localBaseUrl, geminiModel) {
+  const prompt = `
+You are a rapid pre-filter code scanner.
+Analyze this code snippet and determine if there is ANY chance of a bug, vulnerability, or logic error.
+If the code is perfectly clean, return false. If there is even a slight chance of an issue, return true.
+
+Code:
+${codeSnippet}
+
+Respond strictly in JSON format: { "isSuspicious": true } or { "isSuspicious": false }
+`;
+
+  try {
+    let text = '';
+    if (isLocalAI || isOpenAI) {
+      const apiBase = localBaseUrl || 'https://api.openai.com/v1';
+      const key = apiKey || 'local-key';
+      // Force the cheap model for pre-filtering
+      const fastModel = isOpenAI ? 'gpt-4o-mini' : 'llama3';
+      
+      const response = await fetch(`${apiBase.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body: JSON.stringify({
+          model: fastModel,
+          response_format: { type: 'json_object' },
+          messages: [{ role: 'system', content: 'Respond with JSON.' }, { role: 'user', content: prompt }],
+          temperature: 0.0
+        })
+      });
+      const data = await response.json();
+      text = data.choices[0]?.message?.content || '{"isSuspicious": true}';
+    } else {
+      // Gemini Fast Model
+      const result = await geminiModel.generateContent(prompt);
+      text = result.response.text();
+    }
+    
+    text = cleanJsonResponse(text);
+    const json = JSON.parse(text);
+    return json.isSuspicious !== false; // default to true if parsing fails
+  } catch (err) {
+    console.error(`[Pre-Filter Error] Falling back to deep analysis. Error: ${err.message}`);
+    return true; // Default to suspicious to be safe
+  }
+}
+
+/**
  * Invokes either Gemini or OpenAI model dynamically to analyze code snippets.
  */
 export async function huntStateBugsWithGemini(apiKey, changes, astWarnings, modelName = 'gemini-1.5-flash', localOptions = {}) {
@@ -325,7 +376,29 @@ export async function huntStateBugsWithGemini(apiKey, changes, astWarnings, mode
         continue;
       }
 
-      console.log(`AI Agent is analyzing ${warningContexts.length} uncached AST warnings for file: ${filePath}...`);
+      console.log(`AI Agent is running Pre-Filter on ${warningContexts.length} warnings for ${filePath}...`);
+      
+      // RUN PRE-FILTER
+      const filteredContexts = [];
+      for (const ctx of warningContexts) {
+        const isSuspicious = await runPreFilter(apiKey, ctx.codeSnippet, isLocalAI, isOpenAI, localBaseUrl, geminiModel);
+        if (isSuspicious) {
+          filteredContexts.push(ctx);
+        } else {
+          console.log(`[Pre-Filter] Skipped clean code at line ${ctx.line} (Saved API Cost)`);
+          
+          // Cache the clean result so we don't pre-filter it again
+          const hash = calculateWarningHash(filePath, ctx.line, ctx.ruleId, ctx.codeSnippet);
+          setCachedFinding(hash, { isRealBug: false, explanation: "Filtered out by pre-filter" });
+        }
+      }
+
+      if (filteredContexts.length === 0) {
+         console.log(`[Pre-Filter Complete] All warnings for ${filePath} were false alarms.`);
+         continue;
+      }
+
+      console.log(`AI Agent is analyzing ${filteredContexts.length} suspicious AST warnings for file: ${filePath}...`);
 
       const prompt = `
 You are an elite software architect and security auditor specializing in modern web runtimes, asynchronous state flows, React lifecycle synchronization, and message-boundary network stream transport.
@@ -335,7 +408,7 @@ You are reviewing a pull request. Below are suspicious code patterns detected by
 For each static analysis warning, perform a deep semantic review to verify if it constitutes a real, logical bug or race condition.
 
 ### AST Warnings and Code Context:
-${JSON.stringify(warningContexts, null, 2)}
+${JSON.stringify(filteredContexts, null, 2)}
 
 ### Task Instructions:
 1. Review each warning in the list.
@@ -430,7 +503,16 @@ Return your response strictly as a JSON array of objects with this structure (no
         continue;
       }
 
-      console.log(`AI Agent is performing general diff audit for file: ${filePath}...`);
+      console.log(`AI Agent is running Pre-Filter for general diff audit on ${filePath}...`);
+      const isSuspicious = await runPreFilter(apiKey, change.patch, isLocalAI, isOpenAI, localBaseUrl, geminiModel);
+      
+      if (!isSuspicious) {
+        console.log(`[Pre-Filter] Skipped clean diff for ${filePath} (Saved API Cost)`);
+        setCachedFinding(hash, []);
+        continue;
+      }
+
+      console.log(`AI Agent is performing deep general diff audit for file: ${filePath}...`);
       
       const prompt = `
 You are an elite software architect and security auditor.
