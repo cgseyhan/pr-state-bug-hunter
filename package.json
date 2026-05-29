@@ -1,37 +1,8 @@
 {
-  "name": "pr-state-bug-hunter",
-  "version": "2.0.0",
-  "description": "An AI-powered GitHub Action to catch complex async state bugs and lifecycle race conditions in PRs.",
-  "main": "src/index.js",
-  "type": "module",
-  "scripts": {
-    "start": "node src/index.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "test:local": "node test-local.js",
-    "pre-commit": "node test-local.js --pre-commit"
-  },
-  "keywords": [
-    "github-action",
-    "ai",
-    "static-analysis",
-    "race-conditions",
-    "react-bugs",
-    "ast"
-  ],
-  "author": "",
-  "license": "MIT",
-  "dependencies": {
-    "@actions/core": "^1.11.1",
-    "@actions/github": "^6.0.1",
-    "@babel/parser": "^7.29.3",
-    "@babel/traverse": "^7.29.0",
-    "@google/generative-ai": "^0.24.1",
-    "dotenv": "^16.4.5"
-  },
-  "devDependencies": {
-    "@vitest/coverage-v8": "^4.1.7",
-    "vitest": "^4.1.7"
-  }
+  "name": "pr-state-bug-hunter-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
 }

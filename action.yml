@@ -35,7 +35,7 @@ runs:
           bug-hunter-${{ github.repository }}-${{ github.ref }}-
           bug-hunter-${{ github.repository }}-
     - name: Run PR State Bug Hunter
-      run: node ${{ github.action_path }}/dist/index.js
+      run: node ${{ github.action_path }}/packages/core/src/index.js
       shell: bash
       env:
         INPUT_GITHUB-TOKEN: ${{ inputs.github-token }}
