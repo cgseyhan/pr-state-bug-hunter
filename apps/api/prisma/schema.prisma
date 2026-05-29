@@ -1,0 +1,71 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(uuid())
+  githubId      Int            @unique
+  username      String
+  email         String?
+  avatarUrl     String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  // SaaS Subscription
+  stripeCustomerId String?
+  subscriptionTier String        @default("FREE") // FREE, PRO, ENTERPRISE
+
+  installations Installation[]
+}
+
+model Installation {
+  id             String       @id @default(uuid())
+  githubInstallId Int         @unique
+  accountName    String       // Organization or User name
+  accountType    String       // "User" or "Organization"
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  // Relation to User who installed it
+  ownerId        String
+  owner          User         @relation(fields: [ownerId], references: [id])
+
+  repositories   Repository[]
+}
+
+model Repository {
+  id             String       @id @default(uuid())
+  githubRepoId   Int          @unique
+  fullName       String       // e.g., "cgseyhan/pr-state-bug-hunter"
+  isPrivate      Boolean      @default(false)
+  isActive       Boolean      @default(true)
+  
+  // Settings
+  severityThreshold String    @default("LOW")
+  autoComment       Boolean   @default(true)
+
+  installationId String
+  installation   Installation @relation(fields: [installationId], references: [id])
+
+  analysisJobs   AnalysisJob[]
+}
+
+model AnalysisJob {
+  id             String       @id @default(uuid())
+  pullRequestNum Int
+  commitSha      String
+  status         String       // PENDING, SUCCESS, FAILED
+  filesScanned   Int          @default(0)
+  bugsFound      Int          @default(0)
+  executionMs    Int          @default(0)
+  
+  createdAt      DateTime     @default(now())
+
+  repositoryId   String
+  repository     Repository   @relation(fields: [repositoryId], references: [id])
+}
