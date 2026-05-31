@@ -13,6 +13,8 @@ import {
   postJobSummary,
   checkUserWritePermission
 } from './github/octokitClient.js';
+import { loadConfig } from './config/configLoader.js';
+import { analyzeWithSaaS } from './analyzer/saasClient.js';
 
 // Load local .env files if present (highly convenient for local tests/development)
 if (fs.existsSync('.env')) {
@@ -47,84 +49,7 @@ export function logTelemetry(eventData) {
   }
 }
 
-/**
- * Extracts line-centered context from source code to assist matching.
- */
-function getLineContext(code, targetLine, contextWindow = 15) {
-  const lines = code.split('\n');
-  const totalLines = lines.length;
-
-  const start = Math.max(0, targetLine - 1 - contextWindow);
-  const end = Math.min(totalLines, targetLine + contextWindow);
-
-  const contextLines = [];
-  for (let i = start; i < end; i++) {
-    const lineNum = i + 1;
-    const isTarget = lineNum === targetLine;
-    const prefix = isTarget ? '>> ' : '   ';
-    contextLines.push(`${prefix}${lineNum}: ${lines[i]}`);
-  }
-
-  return contextLines.join('\n');
-}
-
-/**
- * Smartly patches file content using drop-in code replacements.
- * Walks through shrinking matching windows to ensure robust patching.
- */
-export function applyFixToText(fileContent, line, proposedFix) {
-  let cleanFix = proposedFix.trim();
-  if (cleanFix.startsWith('```')) {
-    const match = cleanFix.match(/```[a-zA-Z]*\n([\s\S]*?)```/);
-    if (match) {
-      cleanFix = match[1];
-    } else {
-      cleanFix = cleanFix.replace(/^```[a-zA-Z]*\n?|```$/g, '');
-    }
-  }
-
-  // Try standard 15-line context matching first
-  const codeSnippet = getLineContext(fileContent, line, 15);
-  const originalSnippet = codeSnippet.split('\n')
-    .map(l => {
-      const match = l.match(/^(?:\s{3}|>>\s)\d+:\s?(.*)$/);
-      return match ? match[1] : l;
-    })
-    .join('\n')
-    .trim();
-
-  if (fileContent.includes(originalSnippet)) {
-    return fileContent.replace(originalSnippet, cleanFix.trim());
-  }
-
-  // Fallback: search with a progressively smaller context window to ignore outer lines
-  for (let window = 5; window >= 1; window--) {
-    const smallSnippet = getLineContext(fileContent, line, window);
-    const originalSmallSnippet = smallSnippet.split('\n')
-      .map(l => {
-        const match = l.match(/^(?:\s{3}|>>\s)\d+:\s?(.*)$/);
-        return match ? match[1] : l;
-      })
-      .join('\n')
-      .trim();
-    
-    if (fileContent.includes(originalSmallSnippet)) {
-      return fileContent.replace(originalSmallSnippet, cleanFix.trim());
-    }
-  }
-
-  // Final fallback: Replace exact single line if the fix is one line
-  const lines = fileContent.split('\n');
-  const targetIdx = line - 1;
-  if (targetIdx >= 0 && targetIdx < lines.length) {
-    if (!cleanFix.includes('\n')) {
-      lines[targetIdx] = cleanFix;
-      return lines.join('\n');
-    }
-  }
-
-  return null;
-}
+import { applyAndVerifyFix } from './agents/autoFixer.js';
 
 /**
  * Filter issues by user-configured severity threshold.
@@ -147,7 +72,6 @@ async function run() {
 
     const githubToken = core.getInput('github-token') || process.env.GITHUB_TOKEN;
     const geminiApiKey = core.getInput('gemini-api-key') || process.env.GEMINI_API_KEY;
-    const severityThreshold = core.getInput('severity-threshold') || process.env.SEVERITY_THRESHOLD || 'LOW';
     const autoComment = (core.getInput('auto-comment') || process.env.AUTO_COMMENT || 'true') === 'true';
     const geminiModel = core.getInput('gemini-model') || process.env.GEMINI_MODEL || 'gemini-1.5-flash';
     const localAiBaseUrl = core.getInput('local-ai-base-url') || process.env.LOCAL_AI_BASE_URL;
@@ -157,6 +81,10 @@ async function run() {
       core.setFailed("Missing GITHUB_TOKEN. Please set the token input or environment variable.");
       return;
     }
+
+    // Load configuration
+    const config = loadConfig();
+    const severityThreshold = config.severityThreshold;
 
     const octokit = github.getOctokit(githubToken);
     const eventName = github.context.eventName;
@@ -175,7 +103,7 @@ async function run() {
       const comment = github.context.payload.comment;
       const commentBody = comment.body.trim();
 
-      if (commentBody.startsWith('/fix')) {
+      if (commentBody.startsWith('/bug-hunter fix') || commentBody.startsWith('/fix')) {
         console.log(`📣 [Slash Command] Received fix request: "${commentBody}"`);
 
         // ── PHASE 1: SECURITY GUARD ─────────────────────────────────────────
@@ -200,7 +128,9 @@ async function run() {
         // ────────────────────────────────────────────────────────────────────
 
         const parts = commentBody.split(/\s+/);
-        const lineArg = parts[1]; // e.g. "9" or "all"
+        // /bug-hunter fix <id>  => parts[2]
+        // /fix <id>             => parts[1]
+        const idArg = commentBody.startsWith('/bug-hunter fix') ? parts[2] : parts[1];
 
         const { owner, repo, number: pullNumber } = github.context.issue;
         const { data: pr } = await octokit.rest.pulls.get({
@@ -209,6 +139,24 @@ async function run() {
           pull_number: pullNumber
         });
         const branchName = pr.head.ref;
+        const isFork = pr.head.repo.id !== pr.base.repo.id;
+
+        // Stage 4: Safer Auto-Fix checks
+        if (config.autoFix?.enabled === false) {
+          await octokit.rest.issues.createComment({
+            owner, repo, issue_number: pullNumber,
+            body: `🚫 **Auto-Fix is disabled** in \`bug-hunter.config.json\`.`
+          });
+          return;
+        }
+
+        if (isFork && !config.autoFix?.allowForks) {
+           await octokit.rest.issues.createComment({
+            owner, repo, issue_number: pullNumber,
+            body: `🚫 **Auto-Fix across forks is disabled** for security reasons (\`allowForks: false\`).`
+          });
+          return;
+        }
 
         console.log(`Resolving code and scanning files on branch "${branchName}"...`);
         const changes = await getPrChanges(octokit, github.context);
@@ -224,7 +172,7 @@ async function run() {
             });
             const fileContent = Buffer.from(fileData.content, 'base64').toString('utf8');
             
-            const fileWarnings = analyzeCodeAST(fileContent, change.path);
+            const fileWarnings = analyzeCodeAST(fileContent, change.path, config);
             const relevantWarnings = fileWarnings.filter(warning => 
               change.changedLines.includes(warning.line)
             );
@@ -247,9 +195,9 @@ async function run() {
 
         let fixesApplied = 0;
         for (const bug of verifiedBugs) {
-          const matchesLine = lineArg === 'all' || !lineArg || String(bug.line) === String(lineArg);
-          if (matchesLine && bug.proposedFix) {
-            console.log(`Applying fix for bug on line ${bug.line} of ${bug.filePath}...`);
+          const matchesId = idArg === 'all' || !idArg || bug.id === idArg || String(bug.line) === String(idArg);
+          if (matchesId && bug.proposedFix) {
+            console.log(`Applying fix for finding ${bug.id} in ${bug.filePath}...`);
 
             const { data: fileData } = await octokit.rest.repos.getContent({
               owner,
@@ -260,66 +208,70 @@ async function run() {
             const currentContent = Buffer.from(fileData.content, 'base64').toString('utf8');
 
             // ── PHASE 2: AUTO-HEALING RETRY LOOP ────────────────────────────
-            let updatedContent = applyFixToText(currentContent, bug.line, bug.proposedFix);
+            let fixResult = applyAndVerifyFix(currentContent, bug.line, bug.proposedFix, bug.filePath);
+            let updatedContent = fixResult.success ? fixResult.updatedContent : null;
             let currentFix = bug.proposedFix;
             const MAX_HEAL_ATTEMPTS = 3;
 
             for (let attempt = 1; attempt <= MAX_HEAL_ATTEMPTS; attempt++) {
-              if (!updatedContent) {
-                console.warn(`[Auto-Heal] Attempt ${attempt}: Patch application failed for ${bug.filePath}:${bug.line}.`);
-                break;
-              }
-
-              const syntaxCheck = verifySyntax(updatedContent, bug.filePath);
-              if (syntaxCheck.valid) {
-                console.log(`[Auto-Heal] ✅ Attempt ${attempt}: Patch is syntactically valid.`);
+              if (fixResult.success) {
+                console.log(`[Auto-Heal] ✅ Attempt ${attempt}: Patch is safe and syntactically valid.`);
                 break;
               }
 
               if (attempt === MAX_HEAL_ATTEMPTS) {
-                console.warn(`[Auto-Heal] ❌ All ${MAX_HEAL_ATTEMPTS} healing attempts exhausted for ${bug.filePath}:${bug.line}. Syntax error: ${syntaxCheck.error}`);
+                console.warn(`[Auto-Heal] ❌ All ${MAX_HEAL_ATTEMPTS} healing attempts exhausted. Reason: ${fixResult.reason}`);
                 await octokit.rest.issues.createComment({
                   owner,
                   repo,
                   issue_number: pullNumber,
-                  body: `🤖 **PR State Bug Hunter Auto-Fix Blocked After ${MAX_HEAL_ATTEMPTS} Repair Attempts!** ❌\n\nThe proposed fix for **line ${bug.line}** in \`${bug.filePath}\` could not be corrected after ${MAX_HEAL_ATTEMPTS} AI-guided attempts.\n\nFinal syntax error:\n\`\`\`\n${syntaxCheck.error}\n\`\`\`\n\nPlease apply the fix manually. 🛡️`
+                  body: `🤖 **PR State Bug Hunter Auto-Fix Blocked After ${MAX_HEAL_ATTEMPTS} Repair Attempts!** ❌\n\nThe proposed fix for **line ${bug.line}** in \`${bug.filePath}\` could not be safely applied.\n\nFinal error:\n\`\`\`\n${fixResult.reason}\n\`\`\`\n\nPlease apply the fix manually. 🛡️`
                 });
                 updatedContent = null;
                 break;
               }
 
-              console.log(`[Auto-Heal] 🔄 Syntax error detected on attempt ${attempt}. Asking AI to correct the patch... Error: ${syntaxCheck.error}`);
+              console.log(`[Auto-Heal] 🔄 Safety/Syntax error detected on attempt ${attempt}. Asking AI to correct the patch... Error: ${fixResult.reason}`);
               const correctedFix = await generateCorrectionPatch(
                 geminiApiKey,
                 currentFix,
-                syntaxCheck.error,
+                fixResult.reason,
                 geminiModel,
                 { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
               );
 
               if (!correctedFix) break;
               currentFix = correctedFix;
-              updatedContent = applyFixToText(currentContent, bug.line, correctedFix);
+              fixResult = applyAndVerifyFix(currentContent, bug.line, correctedFix, bug.filePath);
+              updatedContent = fixResult.success ? fixResult.updatedContent : null;
             }
             // ────────────────────────────────────────────────────────────────
 
             if (updatedContent) {
-              await commitFixToPrBranch(octokit, github.context, branchName, bug.filePath, updatedContent, bug.line);
-              fixesApplied++;
+              if (config.autoFix?.mode === 'suggestion') {
+                // Dry Run / Suggestion mode: just create a comment with the patch
+                await octokit.rest.issues.createComment({
+                  owner, repo, issue_number: pullNumber,
+                  body: `🤖 **PR State Bug Hunter Auto-Fix Suggestion** (Dry Run)\n\nI have prepared a verified patch for \`${bug.filePath}\` on line ${bug.line}. Since \`autoFix.mode\` is set to \`suggestion\`, I am not committing it directly.\n\n<details><summary><b>View Verified Patch</b></summary>\n\n\`\`\`diff\n${currentFix}\n\`\`\`\n</details>`
+                });
+                fixesApplied++;
+              } else {
+                // Commit mode
+                await commitFixToPrBranch(octokit, github.context, branchName, bug.filePath, updatedContent, bug.line);
+                fixesApplied++;
 
-              await octokit.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: pullNumber,
-                body: `🤖 **PR State Bug Hunter Auto-Fix Applied!**\nSuccessfully committed the proposed fix for the bug on **line ${bug.line}** in \`${bug.filePath}\` to the branch \`${branchName}\`. 🛡️`
-              });
+                await octokit.rest.issues.createComment({
+                  owner, repo, issue_number: pullNumber,
+                  body: `🤖 **PR State Bug Hunter Auto-Fix Applied!**\nSuccessfully committed the proposed fix for the bug on **line ${bug.line}** in \`${bug.filePath}\` to the branch \`${branchName}\`. 🛡️`
+                });
+              }
             }
           }
         }
 
         logTelemetry({
           action: 'slash_fix',
-          lineArg,
+          idArg,
           fixesApplied
         });
         
@@ -348,63 +300,84 @@ async function run() {
       return;
     }
 
-    console.log("Step 2: Performing static AST vulnerability sweeps...");
-    const astWarnings = [];
+    let astWarnings = [];
     let filesScannedCount = 0;
+    let verifiedBugs = [];
 
-    for (const change of changes) {
+    // ── PHASE 3: SAAS MODE (STAGE 6) ──────────────────────────────────
+    let usedSaaS = false;
+    if (config.saas?.enabled && config.saas?.apiBaseUrl) {
+      console.log(`[SaaS Mode] SaaS is enabled. Calling backend API: ${config.saas.apiBaseUrl}...`);
       try {
-        let fileContent = '';
-        if (fs.existsSync(change.path)) {
-          fileContent = fs.readFileSync(change.path, 'utf8');
-        }
-
-        if (fileContent) {
-          filesScannedCount++;
-          const fileWarnings = analyzeCodeAST(fileContent, change.path);
-          
-          const relevantWarnings = fileWarnings.filter(warning => 
-            change.changedLines.includes(warning.line)
-          );
-
-          relevantWarnings.forEach(w => {
-            astWarnings.push({
-              ...w,
-              path: change.path
-            });
-            console.log(`[AST Warning] [${change.path}:${w.line}] [${w.ruleId}]: ${w.message}`);
-          });
-        }
+        const saasData = await analyzeWithSaaS(config, github.context, changes);
+        verifiedBugs = saasData.findings || [];
+        filesScannedCount = saasData.usage?.filesScanned || changes.length;
+        astWarnings = { length: saasData.usage?.astWarnings || 0 }; // stub
+        usedSaaS = true;
+        console.log(`[SaaS Mode] Successfully retrieved ${verifiedBugs.length} findings from backend.`);
       } catch (err) {
-        core.warning(`Error running AST analysis on ${change.path}: ${err.message}`);
+        console.warn(`[SaaS Fallback] SaaS backend unreachable or failed. Falling back to local AST engine. Error: ${err.message}`);
       }
     }
 
-    console.log(`AST sweep complete. Scanned ${filesScannedCount} files, encountered ${astWarnings.length} structurally weak points in updated lines.`);
+    // ── PHASE 4: LOCAL AST ENGINE FALLBACK ────────────────────────────
+    if (!usedSaaS) {
+      console.log("Step 2: Performing static AST vulnerability sweeps...");
+      astWarnings = [];
 
-    // Perform Taint-Based Severity Escalation
-    const escalatedWarnings = escalateWarnings(astWarnings, '.');
+      for (const change of changes) {
+        try {
+          let fileContent = '';
+          if (fs.existsSync(change.path)) {
+            fileContent = fs.readFileSync(change.path, 'utf8');
+          }
 
-    let verifiedBugs = [];
-    if (geminiApiKey || localAiBaseUrl) {
-      console.log(`Step 3: Initiating AI Agent semantic auditing...`);
-      verifiedBugs = await huntStateBugsWithGemini(
-        geminiApiKey, 
-        changes, 
-        escalatedWarnings, 
-        geminiModel,
-        { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
-      );
-    } else {
-      console.log("Step 3: Neither GEMINI_API_KEY nor LOCAL_AI_BASE_URL provided. Defaulting to raw AST warning reports...");
-      verifiedBugs = escalatedWarnings.map(w => ({
-        filePath: w.path,
-        line: w.line,
-        ruleId: w.ruleId,
-        severity: w.severity,
-        explanation: w.message,
-        proposedFix: ''
-      }));
+          if (fileContent) {
+            filesScannedCount++;
+            const fileWarnings = analyzeCodeAST(fileContent, change.path, config);
+            
+            const relevantWarnings = fileWarnings.filter(warning => 
+              change.changedLines.includes(warning.line)
+            );
+
+            relevantWarnings.forEach(w => {
+              astWarnings.push({
+                ...w,
+                path: change.path
+              });
+              console.log(`[AST Warning] [${change.path}:${w.line}] [${w.ruleId}]: ${w.message}`);
+            });
+          }
+        } catch (err) {
+          core.warning(`Error running AST analysis on ${change.path}: ${err.message}`);
+        }
+      }
+
+      console.log(`AST sweep complete. Scanned ${filesScannedCount} files, encountered ${astWarnings.length} structurally weak points in updated lines.`);
+
+      // Perform Taint-Based Severity Escalation
+      const escalatedWarnings = escalateWarnings(astWarnings, '.');
+
+      if (geminiApiKey || localAiBaseUrl) {
+        console.log(`Step 3: Initiating AI Agent semantic auditing...`);
+        verifiedBugs = await huntStateBugsWithGemini(
+          geminiApiKey, 
+          changes, 
+          escalatedWarnings, 
+          geminiModel,
+          { apiBaseUrl: localAiBaseUrl, modelName: localModelName }
+        );
+      } else {
+        console.log("Step 3: Neither GEMINI_API_KEY nor LOCAL_AI_BASE_URL provided. Defaulting to raw AST warning reports...");
+        verifiedBugs = escalatedWarnings.map(w => ({
+          filePath: w.path,
+          line: w.line,
+          ruleId: w.ruleId,
+          severity: w.severity,
+          explanation: w.message,
+          proposedFix: ''
+        }));
+      }
     }
 
     const filteredBugs = filterIssuesBySeverity(verifiedBugs, severityThreshold);
@@ -421,9 +394,9 @@ async function run() {
     if (autoComment) {
       console.log("Step 5: Publishing findings to GitHub Pull Request...");
       if (filteredBugs.length > 0) {
-        await postInlineReviewComments(octokit, github.context, commitSha, filteredBugs);
+        await postInlineReviewComments(octokit, github.context, commitSha, filteredBugs, config);
       }
-      await postPrSummaryComment(octokit, github.context, filesScannedCount, astWarnings.length, filteredBugs);
+      await postPrSummaryComment(octokit, github.context, filesScannedCount, astWarnings.length, filteredBugs, config);
     } else {
       console.log("Step 5: Auto-comment is disabled. Printing findings summary to action log:");
       console.log(JSON.stringify(filteredBugs, null, 2));

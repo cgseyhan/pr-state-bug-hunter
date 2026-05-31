@@ -13,6 +13,10 @@ inputs:
     description: 'Minimum severity of bugs to report on the PR (LOW, MEDIUM, HIGH).'
     required: false
     default: 'LOW'
+  gemini-model:
+    description: 'The specific Gemini model to use for analysis (e.g., gemini-1.5-flash, gemini-1.5-pro).'
+    required: false
+    default: 'gemini-1.5-flash'
   auto-comment:
     description: 'Whether the action should post inline and overview review comments on the PR.'
     required: false
@@ -40,6 +44,7 @@ runs:
       env:
         INPUT_GITHUB-TOKEN: ${{ inputs.github-token }}
         INPUT_GEMINI-API-KEY: ${{ inputs.gemini-api-key }}
+        INPUT_GEMINI-MODEL: ${{ inputs.gemini-model }}
         INPUT_SEVERITY-THRESHOLD: ${{ inputs.severity-threshold }}
         INPUT_AUTO-COMMENT: ${{ inputs.auto-comment }}
         INPUT_LOCAL-AI-BASE-URL: ${{ inputs.local-ai-base-url }}

@@ -5,16 +5,24 @@ import path from 'path';
 const CACHE_FILE = '.bug-hunter-cache.json';
 
 /**
- * Calculates a unique SHA-256 signature for a static analysis warning.
+ * Calculates a deterministic fingerprint for a finding.
+ * @param {string} repoFullName - GitHub repository identifier (e.g. "owner/repo").
  * @param {string} filePath - Path of the audited file.
- * @param {number} line - Target line number.
  * @param {string} ruleId - The triggered rule ID.
- * @param {string} codeSnippetContext - The context code surrounding the warning.
- * @returns {string} SHA-256 hex string.
+ * @param {string} normalizedSnippet - The normalized code snippet.
+ * @param {string} nodeType - Relevant AST node type if available.
+ * @returns {string} SHA-256 hex string fingerprint.
  */
-export function calculateWarningHash(filePath, line, ruleId, codeSnippetContext) {
-  const payload = `${filePath}:${line}:${ruleId}:${codeSnippetContext.trim()}`;
+export function generateFingerprint(repoFullName, filePath, ruleId, normalizedSnippet, nodeType = 'unknown') {
+  const payload = `${repoFullName || 'local'}:${filePath}:${ruleId}:${nodeType}:${normalizedSnippet.trim()}`;
   return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+/**
+ * Generates a short finding ID from a fingerprint.
+ */
+export function generateFindingId(fingerprint) {
+  return fingerprint.substring(0, 12);
 }
 
 /**

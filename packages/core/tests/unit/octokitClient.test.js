@@ -55,6 +55,8 @@ function makeOctokit({
         createComment: createCommentError
           ? vi.fn().mockRejectedValue(createCommentError)
           : vi.fn().mockResolvedValue({ data: { id: 99 } }),
+        listComments: vi.fn().mockResolvedValue({ data: [] }),
+        updateComment: vi.fn().mockResolvedValue({ data: { id: 99 } })
       },
     },
   };
@@ -168,7 +170,7 @@ describe('postInlineReviewComments – proposedTest rendering', () => {
     const issues = [{ ...baseIssue, proposedTest: null }];
     await postInlineReviewComments(octokit, makeContext(), 7, issues, 'abc123');
     const body = octokit.rest.pulls.createReviewComment.mock.calls[0][0].body;
-    expect(body).toContain('/fix');
+    expect(body).toContain('/bug-hunter fix');
   });
 });
 

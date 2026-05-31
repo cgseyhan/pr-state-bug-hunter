@@ -7,65 +7,66 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id            String         @id @default(uuid())
-  githubId      Int            @unique
-  username      String
-  email         String?
-  avatarUrl     String?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-
-  // SaaS Subscription
-  stripeCustomerId String?
-  subscriptionTier String        @default("FREE") // FREE, PRO, ENTERPRISE
-
-  installations Installation[]
+model Organization {
+  id              String         @id @default(uuid())
+  githubId        Int            @unique
+  name            String
+  installations   Installation[]
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 }
 
 model Installation {
-  id             String       @id @default(uuid())
-  githubInstallId Int         @unique
-  accountName    String       // Organization or User name
-  accountType    String       // "User" or "Organization"
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  // Relation to User who installed it
-  ownerId        String
-  owner          User         @relation(fields: [ownerId], references: [id])
-
-  repositories   Repository[]
+  id              String         @id @default(uuid())
+  githubAppId     Int            @unique
+  organizationId  String
+  organization    Organization   @relation(fields: [organizationId], references: [id])
+  repositories    Repository[]
+  isActive        Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 }
 
 model Repository {
-  id             String       @id @default(uuid())
-  githubRepoId   Int          @unique
-  fullName       String       // e.g., "cgseyhan/pr-state-bug-hunter"
-  isPrivate      Boolean      @default(false)
-  isActive       Boolean      @default(true)
-  
-  // Settings
-  severityThreshold String    @default("LOW")
-  autoComment       Boolean   @default(true)
-
-  installationId String
-  installation   Installation @relation(fields: [installationId], references: [id])
-
-  analysisJobs   AnalysisJob[]
+  id              String         @id @default(uuid())
+  githubId        Int            @unique
+  fullName        String
+  installationId  String
+  installation    Installation   @relation(fields: [installationId], references: [id])
+  analyses        Analysis[]
+  findings        Finding[]
+  isPrivate       Boolean        @default(false)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 }
 
-model AnalysisJob {
-  id             String       @id @default(uuid())
-  pullRequestNum Int
-  commitSha      String
-  status         String       // PENDING, SUCCESS, FAILED
-  filesScanned   Int          @default(0)
-  bugsFound      Int          @default(0)
-  executionMs    Int          @default(0)
-  
-  createdAt      DateTime     @default(now())
+model Analysis {
+  id              String         @id @default(uuid())
+  repositoryId    String
+  repository      Repository     @relation(fields: [repositoryId], references: [id])
+  pullRequestNum  Int
+  headSha         String
+  status          String         // pending, success, failed
+  filesScanned    Int            @default(0)
+  aiCalls         Int            @default(0)
+  findings        Finding[]
+  createdAt       DateTime       @default(now())
+}
 
-  repositoryId   String
-  repository     Repository   @relation(fields: [repositoryId], references: [id])
+model Finding {
+  id              String         @id @default(uuid())
+  fingerprint     String         @unique
+  repositoryId    String
+  repository      Repository     @relation(fields: [repositoryId], references: [id])
+  analysisId      String
+  analysis        Analysis       @relation(fields: [analysisId], references: [id])
+  ruleId          String
+  filePath        String
+  line            Int
+  severity        String
+  explanation     String
+  proposedFix     String?
+  status          String         // new, acknowledged, false_positive, fixed, ignored
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 }

@@ -47,18 +47,18 @@ export async function getPrChanges(octokit, context) {
   console.log(`Fetching files for PR #${pull_number} on ${owner}/${repo}...`);
 
   try {
-    const { data: files } = await octokit.rest.pulls.listFiles({
+    const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
       owner,
       repo,
       pull_number,
-      per_page: 100 // Cap at 100 files for high-fidelity scanning
+      per_page: 100
     });
 
     const parsedChanges = [];
 
     for (const file of files) {
       // Only scan code files that can be AST-parsed or analyzed for race conditions/protocols
-      const isAnalyzable = /\.(js|jsx|ts|tsx|json|mjs|cjs)$/i.test(file.filename);
+      const isAnalyzable = /\.(js|jsx|ts|tsx|mjs|cjs|vue|svelte)$/i.test(file.filename);
       if (!isAnalyzable) continue;
 
       // Skip deleted files, as they no longer exist for AST or bug hunter analysis

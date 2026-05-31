@@ -36,18 +36,29 @@ export async function checkUserWritePermission(octokit, context, username) {
  * @param {Object} context - The GitHub Action context.
  * @param {string} commitSha - The target commit SHA.
  * @param {Array} issues - Array of verified issues.
+ * @param {Object} config - The workspace configuration.
  */
-export async function postInlineReviewComments(octokit, context, commitSha, issues) {
+export async function postInlineReviewComments(octokit, context, commitSha, issues, config) {
   const { owner, repo, number: pull_number } = context.issue;
+
+  if (config?.commentMode === 'summary-only') {
+    console.log(`Skipping inline review comments because commentMode is 'summary-only'.`);
+    return;
+  }
 
   console.log(`Posting ${issues.length} inline review comments on PR #${pull_number}...`);
 
   for (const issue of issues) {
-    const testBlock = issue.proposedTest
-      ? `\n<details>\n<summary>🧪 <b>Suggested Unit Test (Reproduce &amp; Guard this bug)</b></summary>\n\n${issue.proposedTest}\n</details>`
-      : '';
+    let commentBody = '';
+    
+    if (config?.commentMode === 'compact') {
+      commentBody = `**PR State Bug Hunter** 🛡️\n\n**Warning:** \`${issue.ruleId}\` (${issue.severity})\n**Reason:** ${issue.explanation}\n\n*Command: \`/bug-hunter fix ${issue.id}\`*`;
+    } else {
+      const testBlock = issue.proposedTest
+        ? `\n<details>\n<summary>🧪 <b>Suggested Unit Test (Reproduce &amp; Guard this bug)</b></summary>\n\n${issue.proposedTest}\n</details>`
+        : '';
 
-    const commentBody = `
+      commentBody = `
 ### 🤖 PR State Bug Hunter Warning 🛡️
 
 **Bug Type:** \`${issue.ruleId}\`
@@ -58,8 +69,9 @@ ${issue.explanation}
 
 ${issue.proposedFix ? `**Proposed Fix:**\n${issue.proposedFix}` : ''}${testBlock}
 
-_Review conducted by PR State Bug Hunter AI. Comment \`/fix ${issue.line}\` to auto-apply the patch. Please verify logical context before applying changes._
+_Review conducted by PR State Bug Hunter AI. Comment \`/bug-hunter fix ${issue.id}\` to auto-apply the patch._
 `;
+    }
 
     try {
       await octokit.rest.pulls.createReviewComment({
@@ -81,21 +93,26 @@ _Review conducted by PR State Bug Hunter AI. Comment \`/fix ${issue.line}\` to a
 
 /**
  * Generates and posts a gorgeous markdown summary comment at the top of the PR.
+ * Updates an existing comment if it finds the hidden marker.
  * @param {Object} octokit - The Octokit client.
  * @param {Object} context - The GitHub Action context.
  * @param {number} filesScannedCount - Number of files scanned.
  * @param {number} astWarningsCount - Number of AST warnings found.
  * @param {Array} verifiedIssues - Array of AI verified issues.
+ * @param {Object} config - The workspace configuration.
  */
-export async function postPrSummaryComment(octokit, context, filesScannedCount, astWarningsCount, verifiedIssues) {
+export async function postPrSummaryComment(octokit, context, filesScannedCount, astWarningsCount, verifiedIssues, config) {
   const { owner, repo, number: pull_number } = context.issue;
 
   console.log(`Posting comprehensive PR Summary Comment...`);
 
-  // Build the gorgeous markdown dashboard
-  let summaryBody = `## 🛡️ PR State Bug Hunter Report 🚀
+  const MARKER = '<!-- pr-state-bug-hunter-summary -->';
+  let summaryBody = `${MARKER}\n## 🛡️ PR State Bug Hunter Report 🚀\n\n`;
 
-An AI-powered static & semantic review has been completed for this pull request. We scanned code structures for asynchronous state leaks, React hook race conditions, memory leaks, and communication protocol hazards.
+  if (config?.commentMode === 'compact') {
+    summaryBody += `* **Files Scanned**: ${filesScannedCount}\n* **Warnings Detected**: ${astWarningsCount}\n* **AI-Verified Bugs**: ${verifiedIssues.length}\n\n---\n`;
+  } else {
+    summaryBody += `An AI-powered static & semantic review has been completed for this pull request. We scanned code structures for asynchronous state leaks, React hook race conditions, memory leaks, and communication protocol hazards.
 
 ### 📊 Scan Summary Dashboard
 | Metric | Result |
@@ -125,14 +142,15 @@ graph TD
 ---
 
 `;
+  }
 
   if (verifiedIssues.length === 0) {
     summaryBody += `### ✅ No State Bugs or Race Conditions Detected!
 Our static analysis and AI models audited your changes and found no issues relating to React hook lifecycle leaks, stale state asynchronous updates, stream framing, or event listener cleanup. Excellent work! 🌟
 `;
   } else {
-    summaryBody += `### 🔴 Critical & Moderate Issues Requiring Attention
-Below is the breakdown of the **${verifiedIssues.length}** issues detected by our hybrid analysis system.
+    summaryBody += `### 🔴 Issues Requiring Attention
+Below is the breakdown of the **${verifiedIssues.length}** issues detected.
 
 `;
 
@@ -146,21 +164,22 @@ Below is the breakdown of the **${verifiedIssues.length}** issues detected by ou
     }
 
     for (const [filePath, fileIssues] of Object.entries(issuesByFile)) {
-      summaryBody += `#### 📄 File: \`${filePath}\`
+      summaryBody += `#### 📄 File: \`${filePath}\`\n\n`;
 
-<details open>
-<summary><b>Click to toggle details for this file (${fileIssues.length} issues)</b></summary>
-<br/>
-
-`;
+      if (config?.commentMode !== 'compact') {
+        summaryBody += `<details open>\n<summary><b>Click to toggle details for this file (${fileIssues.length} issues)</b></summary>\n<br/>\n\n`;
+      }
 
       for (const issue of fileIssues) {
-        const testSection = issue.proposedTest
-          ? `\n<details>\n<summary>🧪 <b>Suggested Unit Test</b></summary>\n\n${issue.proposedTest}\n</details>\n`
-          : '';
+        if (config?.commentMode === 'compact') {
+          summaryBody += `- **Line ${issue.line}** [\`${issue.ruleId}\`] - ${issue.explanation} (Fix ID: \`${issue.id}\`)\n`;
+        } else {
+          const testSection = issue.proposedTest
+            ? `\n<details>\n<summary>🧪 <b>Suggested Unit Test</b></summary>\n\n${issue.proposedTest}\n</details>\n`
+            : '';
 
-        summaryBody += `
-##### ⚠️ Line ${issue.line}: \`${issue.ruleId}\` (${issue.severity === 'HIGH' ? '🔴 HIGH' : issue.severity === 'MEDIUM' ? '🟡 MEDIUM' : '🟢 LOW'})
+          summaryBody += `
+##### ⚠️ [ID: \`${issue.id}\`] Line ${issue.line}: \`${issue.ruleId}\` (${issue.severity === 'HIGH' ? '🔴 HIGH' : issue.severity === 'MEDIUM' ? '🟡 MEDIUM' : '🟢 LOW'})
 
 * **Explanation:** 
   ${issue.explanation}
@@ -169,25 +188,47 @@ ${issue.proposedFix ? `* **Proposed Fix:**\n${issue.proposedFix}` : ''}${testSec
 
 ---
 `;
+        }
       }
 
-      summaryBody += `</details>\n\n`;
+      if (config?.commentMode !== 'compact') {
+        summaryBody += `</details>\n\n`;
+      }
     }
   }
 
   summaryBody += `
 ---
-_Report generated by **[PR State Bug Hunter](https://github.com/marketplace/actions/pr-state-bug-hunter)**. Add high-performance AI state auditing to your CI/CD pipelines._
+_Report generated by PR State Bug Hunter._
 `;
 
   try {
-    await octokit.rest.issues.createComment({
+    // Look for existing comment to update
+    const { data: comments } = await octokit.rest.issues.listComments({
       owner,
       repo,
-      issue_number: pull_number,
-      body: summaryBody
+      issue_number: pull_number
     });
-    console.log("Successfully posted the gorgeous PR summary comment!");
+
+    const existingComment = comments.find(c => c.body.includes(MARKER));
+
+    if (existingComment) {
+      await octokit.rest.issues.updateComment({
+        owner,
+        repo,
+        comment_id: existingComment.id,
+        body: summaryBody
+      });
+      console.log("Successfully updated the existing PR summary comment!");
+    } else {
+      await octokit.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: pull_number,
+        body: summaryBody
+      });
+      console.log("Successfully posted a new PR summary comment!");
+    }
   } catch (err) {
     core.setFailed(`Failed to post summary comment on PR: ${err.message}`);
   }
@@ -294,18 +335,18 @@ graph TD
     summaryHtml += `\n### ✅ Clean Bill of Health!
 No asynchronous state leaks, stale React closures, uncleaned timers/event listeners, or stream transport hazards were found. Your codebase is safe! 🌟\n`;
   } else {
-    summaryHtml += `\n| Rule ID | File | Line | Severity |
-| :--- | :--- | :--- | :--- |
+    summaryHtml += `\n| Finding ID | Rule ID | File | Line | Severity |
+| :--- | :--- | :--- | :--- | :--- |
 `;
     for (const bug of verifiedIssues) {
       const sevEmoji = bug.severity?.toUpperCase() === 'HIGH' ? '🔴 HIGH' : bug.severity?.toUpperCase() === 'MEDIUM' ? '🟡 MEDIUM' : '🟢 LOW';
-      summaryHtml += `| \`${bug.ruleId}\` | \`${bug.filePath}\` | \`${bug.line}\` | ${sevEmoji} |\n`;
+      summaryHtml += `| \`${bug.id}\` | \`${bug.ruleId}\` | \`${bug.filePath}\` | \`${bug.line}\` | ${sevEmoji} |\n`;
     }
   }
 
   summaryHtml += `
 ---
-_For automated repairs, comment \`/fix\` or \`/fix <line>\` directly on the pull request review thread. 🛠️_
+_For automated repairs, comment \`/bug-hunter fix <finding-id>\` directly on the pull request review thread. 🛠️_
 `;
 
   try {

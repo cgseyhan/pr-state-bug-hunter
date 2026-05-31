@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import * as parser from '@babel/parser';
 import _traverse from '@babel/traverse';
+import { loadConfig } from '../config/configLoader.js';
 const traverse = _traverse.default || _traverse;
 
 /**
@@ -32,9 +33,39 @@ function preprocessVueSvelte(code) {
 }
 
 /**
+ * Loads high-risk override patterns from dependency-graph-overrides.json
+ */
+function loadOverrides(workspaceDir) {
+  const overridesPath = path.join(workspaceDir, 'dependency-graph-overrides.json');
+  if (fs.existsSync(overridesPath)) {
+    try {
+      const content = fs.readFileSync(overridesPath, 'utf8');
+      const json = JSON.parse(content);
+      if (Array.isArray(json)) return json;
+      if (json && Array.isArray(json.highRisk)) return json.highRisk;
+      if (json && Array.isArray(json.highRiskPaths)) return json.highRiskPaths;
+    } catch (e) {
+      console.warn(`[Warning] Failed to parse dependency-graph-overrides.json: ${e.message}`);
+    }
+  }
+  return [];
+}
+
+/**
  * Checks if a file path or its content represents a high-risk domain.
  */
-export function isHighRiskFile(filePath, code = '') {
+export function isHighRiskFile(filePath, code = '', overrides = [], workspaceDir = '') {
+  if (overrides.length > 0) {
+    const relPath = workspaceDir ? path.relative(workspaceDir, filePath).replace(/\\/g, '/') : filePath.replace(/\\/g, '/');
+    for (const pattern of overrides) {
+      if (relPath === pattern) return true;
+      try {
+        const regex = new RegExp(pattern, 'i');
+        if (regex.test(relPath)) return true;
+      } catch (e) {}
+    }
+  }
+
   const highRiskRegex = /checkout|payment|billing|auth|login|card|wallet/i;
   if (highRiskRegex.test(path.basename(filePath))) {
     return true;
@@ -104,9 +135,7 @@ export function extractImports(code, filePath) {
 export function scanDirectory(dir, fileList = [], config = null) {
   if (!config) {
     try {
-      if (fs.existsSync('bug-hunter.config.json')) {
-        config = JSON.parse(fs.readFileSync('bug-hunter.config.json', 'utf8'));
-      }
+      config = loadConfig();
     } catch (e) {}
   }
   if (!config) config = {};
@@ -155,6 +184,7 @@ export function buildDependencyGraph(workspaceDir) {
   const graph = new Map(); // targetFile -> Set of files that import it
   const highRiskFiles = new Set();
   const allFiles = scanDirectory(workspaceDir);
+  const overrides = loadOverrides(workspaceDir);
 
   const resolveImportPath = (sourceFile, importStr) => {
     if (!importStr.startsWith('.')) return null; // Ignore external npm packages
@@ -186,7 +216,7 @@ export function buildDependencyGraph(workspaceDir) {
       continue;
     }
 
-    if (isHighRiskFile(absoluteFile, code)) {
+    if (isHighRiskFile(absoluteFile, code, overrides, workspaceDir)) {
       highRiskFiles.add(absoluteFile);
     }
 

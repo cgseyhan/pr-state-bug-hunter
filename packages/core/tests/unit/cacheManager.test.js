@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * Unit tests for: src/analyzer/cacheManager.js
- * Covers: calculateWarningHash, getCachedFinding, setCachedFinding
+ * Covers: generateFingerprint, generateFindingId, getCachedFinding, setCachedFinding
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import crypto from 'crypto';
@@ -24,43 +24,53 @@ vi.mock('fs', () => {
 });
 
 // Import AFTER mocking
-const { calculateWarningHash, getCachedFinding, setCachedFinding } =
+const { generateFingerprint, generateFindingId, getCachedFinding, setCachedFinding } =
   await import('../../src/analyzer/cacheManager.js');
 
-describe('calculateWarningHash', () => {
+describe('generateFingerprint', () => {
   it('produces a 64-char hex SHA-256 string', () => {
-    const hash = calculateWarningHash('src/foo.js', 42, 'EFFECT_ASYNC', 'const x = 1;');
+    const hash = generateFingerprint('owner/repo', 'src/foo.js', 'EFFECT_ASYNC', 'const x = 1;', 'VariableDeclaration');
     expect(hash).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('is deterministic for identical inputs', () => {
-    const h1 = calculateWarningHash('src/foo.js', 42, 'RULE', 'code');
-    const h2 = calculateWarningHash('src/foo.js', 42, 'RULE', 'code');
+    const h1 = generateFingerprint('owner/repo', 'src/foo.js', 'RULE', 'code', 'CallExpression');
+    const h2 = generateFingerprint('owner/repo', 'src/foo.js', 'RULE', 'code', 'CallExpression');
     expect(h1).toBe(h2);
   });
 
   it('is sensitive to filePath changes', () => {
-    const h1 = calculateWarningHash('src/a.js', 1, 'R', 'c');
-    const h2 = calculateWarningHash('src/b.js', 1, 'R', 'c');
+    const h1 = generateFingerprint('owner/repo', 'src/a.js', 'R', 'c');
+    const h2 = generateFingerprint('owner/repo', 'src/b.js', 'R', 'c');
     expect(h1).not.toBe(h2);
   });
 
-  it('is sensitive to line number changes', () => {
-    const h1 = calculateWarningHash('src/a.js', 1, 'R', 'c');
-    const h2 = calculateWarningHash('src/a.js', 2, 'R', 'c');
-    expect(h1).not.toBe(h2);
+  it('is NOT sensitive to line number changes natively', () => {
+    // Because we don't pass line number anymore. If code is same, hash is same.
+    const h1 = generateFingerprint('owner/repo', 'src/a.js', 'R', 'c');
+    const h2 = generateFingerprint('owner/repo', 'src/a.js', 'R', 'c');
+    expect(h1).toBe(h2);
   });
 
   it('is sensitive to ruleId changes', () => {
-    const h1 = calculateWarningHash('src/a.js', 1, 'RULE_A', 'c');
-    const h2 = calculateWarningHash('src/a.js', 1, 'RULE_B', 'c');
+    const h1 = generateFingerprint('owner/repo', 'src/a.js', 'RULE_A', 'c');
+    const h2 = generateFingerprint('owner/repo', 'src/a.js', 'RULE_B', 'c');
     expect(h1).not.toBe(h2);
   });
 
   it('trims codeSnippet before hashing', () => {
-    const h1 = calculateWarningHash('src/a.js', 1, 'R', '  code  ');
-    const h2 = calculateWarningHash('src/a.js', 1, 'R', 'code');
+    const h1 = generateFingerprint('owner/repo', 'src/a.js', 'R', '  code  ');
+    const h2 = generateFingerprint('owner/repo', 'src/a.js', 'R', 'code');
     expect(h1).toBe(h2);
+  });
+});
+
+describe('generateFindingId', () => {
+  it('returns a 12 character prefix of the fingerprint', () => {
+    const hash = generateFingerprint('owner/repo', 'src/foo.js', 'EFFECT_ASYNC', 'const x = 1;');
+    const id = generateFindingId(hash);
+    expect(id).toHaveLength(12);
+    expect(hash.startsWith(id)).toBe(true);
   });
 });
 
@@ -71,7 +81,7 @@ describe('getCachedFinding / setCachedFinding', () => {
   });
 
   it('round-trips a finding correctly', () => {
-    const hash = calculateWarningHash('src/comp.jsx', 9, 'EFFECT_DIRECT_ASYNC', 'useEffect(async () => {});');
+    const hash = generateFingerprint('repo', 'src/comp.jsx', 'EFFECT_DIRECT_ASYNC', 'useEffect(async () => {});');
     const finding = {
       isRealBug: true,
       severity: 'HIGH',

@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import * as parser from '@babel/parser';
 import _traverse from '@babel/traverse';
-import { calculateWarningHash, getCachedFinding, setCachedFinding } from '../analyzer/cacheManager.js';
+import { generateFingerprint, generateFindingId, getCachedFinding, setCachedFinding } from '../analyzer/cacheManager.js';
 
 const traverse = _traverse.default || _traverse;
 
@@ -344,25 +344,40 @@ export async function huntStateBugsWithGemini(apiKey, changes, astWarnings, mode
           codeSnippet = `Diff Patch:\n${change.patch}`;
         }
 
-        const hash = calculateWarningHash(filePath, warning.line, warning.ruleId, codeSnippet);
-        const cached = getCachedFinding(hash);
+        // In bugHunterAgent, repoFullName is not explicitly available unless passed down.
+        // I will use 'local' for now, or just extract from github actions later if needed.
+        const fingerprint = generateFingerprint('repo', filePath, warning.ruleId, codeSnippet);
+        const findingId = generateFindingId(fingerprint);
+        const cached = getCachedFinding(fingerprint);
 
         if (cached) {
           console.log(`[Cache Hit] Reusing cached semantic audit for ${filePath}:${warning.line} (${warning.ruleId})`);
           if (cached.isRealBug) {
             verifiedIssues.push({
+              id: findingId,
+              fingerprint,
               filePath,
-              line: warning.line,
+              lineStart: warning.line,
+              lineEnd: warning.line,
+              line: warning.line, // keep for backwards compatibility internally
               ruleId: warning.ruleId,
+              ruleVersion: cached.ruleVersion || warning.ruleVersion || '1.0.0',
               severity: cached.severity || warning.severity || 'MEDIUM',
+              confidence: cached.confidence || 'high',
               explanation: cached.explanation,
-              proposedFix: cached.proposedFix
+              evidence: codeSnippet,
+              proposedFix: cached.proposedFix,
+              suggestedTest: cached.suggestedTest || cached.proposedTest,
+              source: 'hybrid',
+              status: 'new',
+              createdAt: cached.createdAt || new Date().toISOString()
             });
           }
         } else {
           warningContexts.push({
             line: warning.line,
             ruleId: warning.ruleId,
+            ruleVersion: warning.ruleVersion,
             staticMessage: warning.message,
             staticSeverity: warning.warningSeverity || warning.severity || 'MEDIUM',
             codeSnippet
@@ -388,8 +403,8 @@ export async function huntStateBugsWithGemini(apiKey, changes, astWarnings, mode
           console.log(`[Pre-Filter] Skipped clean code at line ${ctx.line} (Saved API Cost)`);
           
           // Cache the clean result so we don't pre-filter it again
-          const hash = calculateWarningHash(filePath, ctx.line, ctx.ruleId, ctx.codeSnippet);
-          setCachedFinding(hash, { isRealBug: false, explanation: "Filtered out by pre-filter" });
+          const fingerprint = generateFingerprint('repo', filePath, ctx.ruleId, ctx.codeSnippet);
+          setCachedFinding(fingerprint, { isRealBug: false, explanation: "Filtered out by pre-filter" });
         }
       }
 
@@ -449,29 +464,45 @@ Return your response strictly as a JSON array of objects with this structure (no
 
         if (Array.isArray(issuesArray)) {
           for (const item of issuesArray) {
-            // Find corresponding code snippet to compute warning hash
             const key = `${item.line}:${item.ruleId}`;
             const snippet = contextSnippetMap.get(key) || '';
-            const hash = calculateWarningHash(filePath, item.line, item.ruleId, snippet);
+            const fingerprint = generateFingerprint('repo', filePath, item.ruleId, snippet);
+            const findingId = generateFindingId(fingerprint);
+
+            const originalWarning = fileWarnings.find(w => w.line === item.line && w.ruleId === item.ruleId);
+            const ruleVersion = originalWarning?.ruleVersion || '1.0.0';
 
             // Cache the result for future runs
-            setCachedFinding(hash, {
+            setCachedFinding(fingerprint, {
               isRealBug: item.isRealBug,
               severity: item.severity || 'MEDIUM',
+              ruleVersion,
               explanation: item.explanation,
               proposedFix: item.proposedFix,
-              proposedTest: item.proposedTest || null
+              suggestedTest: item.proposedTest || null,
+              confidence: item.confidence || 'high',
+              createdAt: new Date().toISOString()
             });
 
             if (item.isRealBug) {
               verifiedIssues.push({
+                id: findingId,
+                fingerprint,
                 filePath,
+                lineStart: item.line,
+                lineEnd: item.line,
                 line: item.line,
                 ruleId: item.ruleId,
+                ruleVersion,
                 severity: item.severity || 'MEDIUM',
+                confidence: item.confidence || 'high',
                 explanation: item.explanation,
+                evidence: snippet,
                 proposedFix: item.proposedFix,
-                proposedTest: item.proposedTest || null
+                suggestedTest: item.proposedTest || null,
+                source: 'hybrid',
+                status: 'new',
+                createdAt: new Date().toISOString()
               });
             }
           }
@@ -481,21 +512,32 @@ Return your response strictly as a JSON array of objects with this structure (no
       }
     } else {
       // Rule 6: General deep scan of diff for logical concurrency bugs if no AST warning hit
-      const hash = calculateWarningHash(filePath, 0, 'GENERAL_DIFF_SCAN', change.patch);
-      const cached = getCachedFinding(hash);
+      const fingerprint = generateFingerprint('repo', filePath, 'GENERAL_DIFF_SCAN', change.patch);
+      const cached = getCachedFinding(fingerprint);
 
       if (cached) {
         console.log(`[Cache Hit] Reusing cached general diff scan results for ${filePath}`);
         if (Array.isArray(cached)) {
           for (const item of cached) {
             if (item.isRealBug) {
+              const itemFingerprint = generateFingerprint('repo', filePath, item.ruleId || 'GENERAL_ASYNC_BUG', change.patch);
               verifiedIssues.push({
+                id: generateFindingId(itemFingerprint),
+                fingerprint: itemFingerprint,
                 filePath,
+                lineStart: item.line,
+                lineEnd: item.line,
                 line: item.line,
                 ruleId: item.ruleId || 'GENERAL_ASYNC_BUG',
                 severity: item.severity || 'MEDIUM',
+                confidence: 'medium',
                 explanation: item.explanation,
-                proposedFix: item.proposedFix
+                evidence: change.patch,
+                proposedFix: item.proposedFix,
+                suggestedTest: item.proposedTest,
+                source: 'ai',
+                status: 'new',
+                createdAt: new Date().toISOString()
               });
             }
           }
@@ -508,7 +550,7 @@ Return your response strictly as a JSON array of objects with this structure (no
       
       if (!isSuspicious) {
         console.log(`[Pre-Filter] Skipped clean diff for ${filePath} (Saved API Cost)`);
-        setCachedFinding(hash, []);
+        setCachedFinding(fingerprint, []);
         continue;
       }
 
@@ -559,19 +601,29 @@ Return your response strictly as a JSON array of objects with this structure (no
         const issuesArray = extractIssuesArray(jsonResponse) || [];
 
         // Save finding array to cache
-        setCachedFinding(hash, issuesArray);
+        setCachedFinding(fingerprint, issuesArray);
 
         if (Array.isArray(issuesArray)) {
           for (const item of issuesArray) {
             if (item.isRealBug) {
+              const itemFingerprint = generateFingerprint('repo', filePath, item.ruleId || 'GENERAL_ASYNC_BUG', change.patch);
               verifiedIssues.push({
+                id: generateFindingId(itemFingerprint),
+                fingerprint: itemFingerprint,
                 filePath,
+                lineStart: item.line,
+                lineEnd: item.line,
                 line: item.line,
                 ruleId: item.ruleId || 'GENERAL_ASYNC_BUG',
                 severity: item.severity || 'MEDIUM',
+                confidence: 'medium',
                 explanation: item.explanation,
+                evidence: change.patch,
                 proposedFix: item.proposedFix,
-                proposedTest: item.proposedTest || null
+                suggestedTest: item.proposedTest || null,
+                source: 'ai',
+                status: 'new',
+                createdAt: new Date().toISOString()
               });
             }
           }

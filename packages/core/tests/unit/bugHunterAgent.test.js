@@ -15,7 +15,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const cacheStore = new Map();
 
 vi.mock('../../src/analyzer/cacheManager.js', () => ({
-  calculateWarningHash: vi.fn((...args) => args.join('|')),
+  generateFingerprint: vi.fn((...args) => args.join('|')),
+  generateFindingId: vi.fn((fingerprint) => fingerprint.substring(0, 12)),
   getCachedFinding: vi.fn((hash) => cacheStore.get(hash) ?? null),
   setCachedFinding: vi.fn((hash, finding) => cacheStore.set(hash, finding)),
 }));
@@ -45,15 +46,17 @@ vi.mock('@google/generative-ai', () => {
 const { huntStateBugsWithGemini, generateCorrectionPatch } =
   await import('../../src/agents/bugHunterAgent.js');
 
-const { calculateWarningHash, getCachedFinding, setCachedFinding } =
+const { generateFingerprint, generateFindingId, getCachedFinding, setCachedFinding } =
   await import('../../src/analyzer/cacheManager.js');
 
 beforeEach(() => {
   cacheStore.clear();
+  vi.resetAllMocks();
   vi.clearAllMocks();
   getCachedFinding.mockImplementation((hash) => cacheStore.get(hash) ?? null);
   setCachedFinding.mockImplementation((hash, finding) => cacheStore.set(hash, finding));
-  calculateWarningHash.mockImplementation((...args) => args.join('|'));
+  generateFingerprint.mockImplementation((...args) => args.join('|'));
+  generateFindingId.mockImplementation((fingerprint) => fingerprint.substring(0, 12));
   mockGenerateContent.mockResolvedValue({
     response: {
       text: () =>
@@ -112,7 +115,7 @@ describe('huntStateBugsWithGemini – cache hits', () => {
       { path: 'src/comp.jsx', line: 9, ruleId: 'EFFECT_DIRECT_ASYNC', message: 'm', severity: 'HIGH' },
     ];
 
-    calculateWarningHash.mockReturnValue(fakeHash);
+    generateFingerprint.mockReturnValue(fakeHash);
 
     const result = await huntStateBugsWithGemini('AIza-fake', changes, warnings);
     expect(result).toHaveLength(1);
@@ -131,7 +134,7 @@ describe('huntStateBugsWithGemini – cache hits', () => {
       explanation: 'Not a bug.',
       proposedFix: null,
     });
-    calculateWarningHash.mockReturnValue(fakeHash);
+    generateFingerprint.mockReturnValue(fakeHash);
 
     const changes = [{ path: 'src/comp.jsx', patch: '+ code', changedLines: [99] }];
     const warnings = [
@@ -168,7 +171,7 @@ describe('huntStateBugsWithGemini – Gemini AI path', () => {
 
     const result = await huntStateBugsWithGemini('AIza-fake', changes, warnings);
     expect(result.length).toBeGreaterThan(0);
-    expect(result[0].proposedTest).toBe('```js\ntest("mocked", () => {});\n```');
+    expect(result[0].suggestedTest).toBe('```js\ntest("mocked", () => {});\n```');
   });
 
   it('caches the proposedTest field alongside other fields', async () => {
@@ -180,7 +183,7 @@ describe('huntStateBugsWithGemini – Gemini AI path', () => {
     await huntStateBugsWithGemini('AIza-fake', changes, warnings);
     expect(setCachedFinding).toHaveBeenCalled();
     const lastFinding = setCachedFinding.mock.calls[0][1];
-    expect(lastFinding).toHaveProperty('proposedTest');
+    expect(lastFinding).toHaveProperty('suggestedTest');
   });
 
   it('handles malformed JSON from AI gracefully (returns empty)', async () => {
@@ -234,7 +237,7 @@ describe('huntStateBugsWithGemini – Gemini AI path', () => {
     const prChanges = [{ path: 'src/cached-clean.jsx', changedLines: [15], patch: '@@ -1 +1 @@\n+cached' }];
     const astWarnings = [];
     
-    const hash = calculateWarningHash('src/cached-clean.jsx', 0, 'GENERAL_DIFF_SCAN', prChanges[0].patch);
+    const hash = generateFingerprint('repo', 'src/cached-clean.jsx', 'GENERAL_DIFF_SCAN', prChanges[0].patch);
     setCachedFinding(hash, [{
       isRealBug: true,
       line: 15,

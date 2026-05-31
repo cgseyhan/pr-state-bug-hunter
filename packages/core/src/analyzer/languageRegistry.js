@@ -31,6 +31,8 @@ export function registerLanguagePlugin(plugin) {
   }
 }
 
+export const registerPlugin = registerLanguagePlugin;
+
 /**
  * Retrieves the plugin for a given file path.
  * @param {string} filePath - The file path (used to extract extension).

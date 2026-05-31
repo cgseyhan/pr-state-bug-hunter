@@ -50,16 +50,18 @@ describe('diffParser', () => {
   describe('getPrChanges', () => {
     it('returns parsed changes for analyzable files', async () => {
       const mockOctokit = {
+        paginate: vi.fn().mockResolvedValue([
+          { filename: 'src/app.js', status: 'modified', patch: '@@ -1,1 +1,2 @@\n+added' },
+          { filename: 'README.md', status: 'modified', patch: '@@ -1,1 +1,2 @@\n+added' },
+          { filename: 'src/deleted.ts', status: 'removed', patch: '@@ -1,1 +0,0 @@\n-deleted' },
+          { filename: 'image.png', status: 'added', patch: null },
+          { filename: 'component.vue', status: 'modified', patch: '@@ -1,1 +1,2 @@\n+added' },
+          { filename: 'store.svelte', status: 'modified', patch: '@@ -1,1 +1,2 @@\n+added' },
+          { filename: 'data.json', status: 'modified', patch: '@@ -1,1 +1,2 @@\n+added' }
+        ]),
         rest: {
           pulls: {
-            listFiles: vi.fn().mockResolvedValue({
-              data: [
-                { filename: 'src/app.js', status: 'modified', patch: '@@ -1,1 +1,2 @@\n+added' },
-                { filename: 'README.md', status: 'modified', patch: '@@ -1,1 +1,2 @@\n+added' },
-                { filename: 'src/deleted.ts', status: 'removed', patch: '@@ -1,1 +0,0 @@\n-deleted' },
-                { filename: 'image.png', status: 'added', patch: null }
-              ]
-            })
+            listFiles: vi.fn()
           }
         }
       };
@@ -67,16 +69,19 @@ describe('diffParser', () => {
       const context = { issue: { owner: 'test', repo: 'testrepo', number: 1 } };
       const changes = await getPrChanges(mockOctokit, context);
 
-      expect(changes).toHaveLength(1);
+      expect(changes).toHaveLength(3);
       expect(changes[0].path).toBe('src/app.js');
       expect(changes[0].changedLines).toEqual([1]);
+      expect(changes[1].path).toBe('component.vue');
+      expect(changes[2].path).toBe('store.svelte');
     });
 
     it('catches and logs errors, returning empty array', async () => {
       const mockOctokit = {
+        paginate: vi.fn().mockRejectedValue(new Error('API failure')),
         rest: {
           pulls: {
-            listFiles: vi.fn().mockRejectedValue(new Error('API failure'))
+            listFiles: vi.fn()
           }
         }
       };
