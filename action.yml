@@ -1,6 +1,6 @@
 name: 'PR State Bug Hunter'
 description: 'AI-powered analyzer to catch async race conditions, memory leaks, and React state bugs in PRs.'
-author: 'Antigravity AI'
+author: 'cgseyhan'
 inputs:
   github-token:
     description: 'The GITHUB_TOKEN or a custom GitHub Personal Access Token.'
